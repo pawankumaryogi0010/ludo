@@ -1,0 +1,1826 @@
+<?php
+/**
+ * ======================================================
+ * ADMIN INDEX.PHP - Pro Command Center
+ * Ludo Tournament Platform - Admin Dashboard
+ * Version: 1.0.0
+ * ======================================================
+ */
+
+// Prevent direct access
+if (!defined('BASE_PATH')) {
+    define('BASE_PATH', dirname(__DIR__));
+}
+
+// Include configuration
+require_once dirname(__DIR__) . '/config/db.php';
+
+// ==============================================
+// SESSION & ADMIN AUTHENTICATION
+// ==============================================
+SessionManager::init();
+
+// Check if admin is logged in
+$isAdminLoggedIn = false;
+
+if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
+    // Verify admin token
+    try {
+        $db = Database::getInstance();
+        $conn = $db->getConnection();
+        
+        $stmt = $conn->prepare("
+            SELECT id, username, is_admin, is_active 
+            FROM users 
+            WHERE id = :admin_id 
+            AND is_admin = 1 
+            AND is_active = 1
+        ");
+        $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
+        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($admin && $_SESSION['admin_token'] === hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
+            $isAdminLoggedIn = true;
+        }
+    } catch (Exception $e) {
+        $isAdminLoggedIn = false;
+    }
+}
+
+// Handle login
+if (!$isAdminLoggedIn && isset($_POST['admin_login'])) {
+    $username = trim($_POST['username'] ?? '');
+    $password = $_POST['password'] ?? '';
+    
+    if (!empty($username) && !empty($password)) {
+        try {
+            $db = Database::getInstance();
+            $conn = $db->getConnection();
+            
+            $stmt = $conn->prepare("
+                SELECT id, username, password_hash, is_admin, is_active 
+                FROM users 
+                WHERE username = :username 
+                AND is_admin = 1
+            ");
+            $stmt->execute([':username' => $username]);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($user && $user['is_active'] == 1 && password_verify($password, $user['password_hash'])) {
+                $_SESSION['admin_id'] = $user['id'];
+                $_SESSION['admin_token'] = hash('sha256', $user['id'] . $user['username'] . 'admin_secret');
+                $_SESSION['admin_username'] = $user['username'];
+                $_SESSION['admin_logged_in'] = true;
+                
+                header('Location: ' . $_SERVER['PHP_SELF']);
+                exit;
+            } else {
+                $loginError = 'Invalid username or password';
+            }
+        } catch (Exception $e) {
+            $loginError = 'Database error occurred';
+        }
+    } else {
+        $loginError = 'Please enter username and password';
+    }
+}
+
+// Handle logout
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header('Location: ' . $_SERVER['PHP_SELF']);
+    exit;
+}
+
+// Handle AJAX requests
+if ($isAdminLoggedIn && isset($_GET['ajax'])) {
+    handleAdminAjax();
+    exit;
+}
+
+// ==============================================
+// ADMIN AJAX HANDLER
+// ==============================================
+function handleAdminAjax() {
+    $action = $_GET['action'] ?? '';
+    $response = ['success' => false, 'message' => 'Invalid action'];
+    
+    try {
+        $db = Database::getInstance();
+        $conn = $db->getConnection();
+        
+        switch ($action) {
+            case 'get_stats':
+                $response = getAdminStats($db, $conn);
+                break;
+            case 'get_users':
+                $response = getUsersList($db, $conn);
+                break;
+            case 'update_balance':
+                $response = updateUserBalance($db, $conn);
+                break;
+            case 'get_transactions':
+                $response = getUserTransactions($db, $conn);
+                break;
+            case 'toggle_user':
+                $response = toggleUserStatus($db, $conn);
+                break;
+            case 'get_matches':
+                $response = getMatchesList($db, $conn);
+                break;
+            default:
+                $response['message'] = 'Unknown action';
+        }
+    } catch (Exception $e) {
+        $response['message'] = 'Error: ' . $e->getMessage();
+    }
+    
+    header('Content-Type: application/json');
+    echo json_encode($response);
+    exit;
+}
+
+// ==============================================
+// ADMIN STATS
+// ==============================================
+function getAdminStats($db, $conn) {
+    $stats = [];
+    
+    // Total Users
+    $stmt = $conn->query("SELECT COUNT(*) as total FROM users WHERE is_admin = 0");
+    $stats['total_users'] = intval($stmt->fetchColumn());
+    
+    // Active Users (last 30 days)
+    $stmt = $conn->query("
+        SELECT COUNT(DISTINCT user_id) as active 
+        FROM transactions 
+        WHERE created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+    ");
+    $stats['active_users'] = intval($stmt->fetchColumn());
+    
+    // Total Matches
+    $stmt = $conn->query("SELECT COUNT(*) as total FROM matches");
+    $stats['total_matches'] = intval($stmt->fetchColumn());
+    
+    // Active Live Tournaments
+    $stmt = $conn->query("
+        SELECT COUNT(*) as active 
+        FROM matches 
+        WHERE status IN ('playing', 'ready')
+    ");
+    $stats['active_tournaments'] = intval($stmt->fetchColumn());
+    
+    // Total Revenue (Admin Commission)
+    $stmt = $conn->query("
+        SELECT SUM(amount) as total 
+        FROM transactions 
+        WHERE source = 'deposit' 
+        AND description LIKE '%platform commission%'
+        AND status = 'success'
+    ");
+    $stats['total_platform_revenue'] = floatval($stmt->fetchColumn());
+    
+    // Cashfree Collections
+    $stmt = $conn->query("
+        SELECT SUM(amount) as total 
+        FROM transactions 
+        WHERE payment_gateway = 'cashfree' 
+        AND status = 'success'
+    ");
+    $stats['cashfree_collections'] = floatval($stmt->fetchColumn());
+    
+    // Net Platform Profit (15% commission)
+    $stmt = $conn->query("
+        SELECT SUM(platform_fee) as total 
+        FROM matches 
+        WHERE status = 'completed'
+    ");
+    $stats['net_platform_profit'] = floatval($stmt->fetchColumn());
+    
+    // Today's Revenue
+    $stmt = $conn->query("
+        SELECT SUM(amount) as total 
+        FROM transactions 
+        WHERE source = 'deposit' 
+        AND description LIKE '%platform commission%'
+        AND status = 'success'
+        AND DATE(created_at) = CURDATE()
+    ");
+    $stats['today_revenue'] = floatval($stmt->fetchColumn());
+    
+    // Pending Withdrawals
+    $stmt = $conn->query("
+        SELECT COUNT(*) as pending 
+        FROM transactions 
+        WHERE source = 'withdrawal' 
+        AND status = 'pending'
+    ");
+    $stats['pending_withdrawals'] = intval($stmt->fetchColumn());
+    
+    return ['success' => true, 'data' => $stats];
+}
+
+// ==============================================
+GET USERS LIST
+// ==============================================
+function getUsersList($db, $conn) {
+    $limit = intval($_GET['limit'] ?? 50);
+    $offset = intval($_GET['offset'] ?? 0);
+    $search = isset($_GET['search']) ? '%' . $_GET['search'] . '%' : '';
+    
+    $params = [];
+    $where = "is_admin = 0";
+    
+    if (!empty($search)) {
+        $where .= " AND (username LIKE :search OR mobile LIKE :search OR email LIKE :search)";
+        $params[':search'] = $search;
+    }
+    
+    // Get total count
+    $stmt = $conn->prepare("SELECT COUNT(*) as total FROM users WHERE {$where}");
+    $stmt->execute($params);
+    $total = intval($stmt->fetchColumn());
+    
+    // Get users
+    $stmt = $conn->prepare("
+        SELECT 
+            id,
+            username,
+            mobile,
+            email,
+            wallet_balance,
+            total_matches_played,
+            total_matches_won,
+            total_earnings,
+            elo_rating,
+            is_verified,
+            is_active,
+            created_at,
+            last_login
+        FROM users 
+        WHERE {$where}
+        ORDER BY id DESC
+        LIMIT :limit OFFSET :offset
+    ");
+    
+    $params[':limit'] = $limit;
+    $params[':offset'] = $offset;
+    $stmt->execute($params);
+    $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return [
+        'success' => true,
+        'data' => [
+            'users' => $users,
+            'total' => $total,
+            'limit' => $limit,
+            'offset' => $offset
+        ]
+    ];
+}
+
+// ==============================================
+// UPDATE USER BALANCE
+// ==============================================
+function updateUserBalance($db, $conn) {
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    if (!$input || !isset($input['user_id']) || !isset($input['amount'])) {
+        return ['success' => false, 'message' => 'Missing required fields'];
+    }
+    
+    $userId = intval($input['user_id']);
+    $amount = floatval($input['amount']);
+    $type = $input['type'] ?? 'credit';
+    $reason = $input['reason'] ?? 'Admin adjustment';
+    
+    if ($userId <= 0 || $amount <= 0) {
+        return ['success' => false, 'message' => 'Invalid user ID or amount'];
+    }
+    
+    try {
+        $db->beginTransaction();
+        
+        // Lock user
+        $stmt = $conn->prepare("
+            SELECT id, username, wallet_balance 
+            FROM users 
+            WHERE id = :user_id 
+            FOR UPDATE
+        ");
+        $stmt->execute([':user_id' => $userId]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$user) {
+            $db->rollback();
+            return ['success' => false, 'message' => 'User not found'];
+        }
+        
+        $currentBalance = floatval($user['wallet_balance']);
+        $newBalance = $type === 'credit' ? $currentBalance + $amount : $currentBalance - $amount;
+        
+        if ($type === 'debit' && $newBalance < 0) {
+            $db->rollback();
+            return ['success' => false, 'message' => 'Insufficient balance for debit'];
+        }
+        
+        // Update wallet
+        $stmt = $conn->prepare("
+            UPDATE users 
+            SET wallet_balance = :new_balance, updated_at = CURRENT_TIMESTAMP 
+            WHERE id = :user_id
+        ");
+        $stmt->execute([
+            ':new_balance' => $newBalance,
+            ':user_id' => $userId
+        ]);
+        
+        // Record transaction
+        $orderId = 'ADMIN-' . strtoupper(uniqid());
+        $txType = $type === 'credit' ? 'credit' : 'debit';
+        $source = $type === 'credit' ? 'bonus' : 'withdrawal';
+        
+        $stmt = $conn->prepare("
+            INSERT INTO transactions (
+                user_id,
+                amount,
+                type,
+                source,
+                description,
+                order_id,
+                status,
+                balance_before,
+                balance_after,
+                metadata,
+                created_at
+            ) VALUES (
+                :user_id,
+                :amount,
+                :type,
+                :source,
+                :description,
+                :order_id,
+                'success',
+                :balance_before,
+                :balance_after,
+                :metadata,
+                CURRENT_TIMESTAMP
+            )
+        ");
+        $stmt->execute([
+            ':user_id' => $userId,
+            ':amount' => $amount,
+            ':type' => $txType,
+            ':source' => $source,
+            ':description' => "Admin {$type}: {$reason}",
+            ':order_id' => $orderId,
+            ':balance_before' => $currentBalance,
+            ':balance_after' => $newBalance,
+            ':metadata' => json_encode([
+                'admin_action' => true,
+                'admin_id' => $_SESSION['admin_id'],
+                'reason' => $reason,
+                'type' => $type
+            ])
+        ]);
+        
+        $db->commit();
+        
+        return [
+            'success' => true,
+            'data' => [
+                'user_id' => $userId,
+                'username' => $user['username'],
+                'old_balance' => $currentBalance,
+                'new_balance' => $newBalance,
+                'amount' => $amount,
+                'type' => $type
+            ]
+        ];
+        
+    } catch (Exception $e) {
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+// ==============================================
+// GET USER TRANSACTIONS
+// ==============================================
+function getUserTransactions($db, $conn) {
+    $userId = intval($_GET['user_id'] ?? 0);
+    $limit = intval($_GET['limit'] ?? 50);
+    
+    if ($userId <= 0) {
+        return ['success' => false, 'message' => 'Invalid user ID'];
+    }
+    
+    $stmt = $conn->prepare("
+        SELECT 
+            id,
+            amount,
+            type,
+            source,
+            description,
+            order_id,
+            status,
+            balance_before,
+            balance_after,
+            created_at,
+            processed_at
+        FROM transactions 
+        WHERE user_id = :user_id
+        ORDER BY created_at DESC
+        LIMIT :limit
+    ");
+    $stmt->execute([
+        ':user_id' => $userId,
+        ':limit' => $limit
+    ]);
+    $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return [
+        'success' => true,
+        'data' => $transactions
+    ];
+}
+
+// ==============================================
+// TOGGLE USER STATUS
+// ==============================================
+function toggleUserStatus($db, $conn) {
+    $input = json_decode(file_get_contents('php://input'), true);
+    
+    if (!$input || !isset($input['user_id'])) {
+        return ['success' => false, 'message' => 'Missing user ID'];
+    }
+    
+    $userId = intval($input['user_id']);
+    $status = isset($input['status']) ? intval($input['status']) : null;
+    
+    if ($userId <= 0) {
+        return ['success' => false, 'message' => 'Invalid user ID'];
+    }
+    
+    if ($status !== null && $status !== 0 && $status !== 1) {
+        return ['success' => false, 'message' => 'Invalid status value'];
+    }
+    
+    try {
+        if ($status === null) {
+            // Toggle
+            $stmt = $conn->prepare("
+                UPDATE users 
+                SET is_active = NOT is_active, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = :user_id AND is_admin = 0
+            ");
+        } else {
+            $stmt = $conn->prepare("
+                UPDATE users 
+                SET is_active = :status, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = :user_id AND is_admin = 0
+            ");
+        }
+        $stmt->execute([':user_id' => $userId, ':status' => $status]);
+        
+        if ($stmt->rowCount() === 0) {
+            return ['success' => false, 'message' => 'User not found or is admin'];
+        }
+        
+        return ['success' => true, 'message' => 'User status updated'];
+        
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+// ==============================================
+// GET MATCHES LIST
+// ==============================================
+function getMatchesList($db, $conn) {
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    $limit = intval($_GET['limit'] ?? 50);
+    $offset = intval($_GET['offset'] ?? 0);
+    
+    $where = "1=1";
+    $params = [];
+    
+    if (!empty($status)) {
+        $where .= " AND m.status = :status";
+        $params[':status'] = $status;
+    }
+    
+    // Get total
+    $stmt = $conn->prepare("SELECT COUNT(*) as total FROM matches m WHERE {$where}");
+    $stmt->execute($params);
+    $total = intval($stmt->fetchColumn());
+    
+    // Get matches
+    $stmt = $conn->prepare("
+        SELECT 
+            m.id,
+            m.room_code,
+            m.entry_fee,
+            m.prize_pool,
+            m.platform_fee,
+            m.status,
+            m.player1_name,
+            m.player2_name,
+            m.winner_name,
+            m.winning_amount,
+            m.turn_number,
+            m.created_at,
+            m.started_at,
+            m.completed_at
+        FROM matches m
+        WHERE {$where}
+        ORDER BY m.id DESC
+        LIMIT :limit OFFSET :offset
+    ");
+    
+    $params[':limit'] = $limit;
+    $params[':offset'] = $offset;
+    $stmt->execute($params);
+    $matches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return [
+        'success' => true,
+        'data' => [
+            'matches' => $matches,
+            'total' => $total,
+            'limit' => $limit,
+            'offset' => $offset
+        ]
+    ];
+}
+
+// ==============================================
+// PAGE RENDER
+// ==============================================
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Command Center - Ludo Tournament Pro</title>
+    <style>
+        /* ==============================================
+           ADMIN STYLES
+           ============================================== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0e1a;
+            color: #f1f5f9;
+            min-height: 100vh;
+        }
+        
+        /* Login Page */
+        .login-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .login-box {
+            background: #1a1a2e;
+            padding: 40px;
+            border-radius: 20px;
+            max-width: 400px;
+            width: 100%;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+        
+        .login-box h1 {
+            font-size: 28px;
+            font-weight: 800;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #fbbf24, #f59e0b);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .login-box p {
+            color: #94a3b8;
+            margin-bottom: 24px;
+        }
+        
+        .login-box .form-group {
+            margin-bottom: 16px;
+        }
+        
+        .login-box .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #94a3b8;
+            margin-bottom: 4px;
+        }
+        
+        .login-box .form-group input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.2s;
+        }
+        
+        .login-box .form-group input:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .login-box .form-group input::placeholder {
+            color: #64748b;
+        }
+        
+        .login-btn {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #fbbf24, #f59e0b);
+            color: #1a1a2e;
+            font-weight: 700;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            font-family: inherit;
+        }
+        
+        .login-btn:hover {
+            transform: scale(1.02);
+            box-shadow: 0 0 30px rgba(251, 191, 36, 0.2);
+        }
+        
+        .login-error {
+            color: #ef4444;
+            font-size: 14px;
+            margin-bottom: 16px;
+            padding: 10px;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 8px;
+        }
+        
+        /* Admin Dashboard */
+        .admin-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .admin-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        
+        .admin-header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #fbbf24, #f59e0b);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .admin-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        
+        .admin-header-actions span {
+            color: #94a3b8;
+            font-size: 14px;
+        }
+        
+        .admin-header-actions a {
+            color: #ef4444;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 14px;
+            padding: 8px 16px;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+        
+        .admin-header-actions a:hover {
+            background: rgba(239, 68, 68, 0.1);
+        }
+        
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .stat-card {
+            background: #1a1a2e;
+            padding: 20px 24px;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            transition: border-color 0.2s;
+        }
+        
+        .stat-card:hover {
+            border-color: rgba(251, 191, 36, 0.2);
+        }
+        
+        .stat-card .stat-label {
+            font-size: 12px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        
+        .stat-card .stat-value {
+            font-size: 28px;
+            font-weight: 800;
+            margin-top: 4px;
+        }
+        
+        .stat-card .stat-value.gold {
+            color: #fbbf24;
+        }
+        
+        .stat-card .stat-value.green {
+            color: #10b981;
+        }
+        
+        .stat-card .stat-value.blue {
+            color: #3b82f6;
+        }
+        
+        .stat-card .stat-value.purple {
+            color: #8b5cf6;
+        }
+        
+        .stat-card .stat-value.red {
+            color: #ef4444;
+        }
+        
+        /* Tabs */
+        .admin-tabs {
+            display: flex;
+            gap: 4px;
+            background: #1a1a2e;
+            padding: 4px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }
+        
+        .admin-tab {
+            padding: 10px 20px;
+            border: none;
+            background: transparent;
+            color: #94a3b8;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        
+        .admin-tab:hover {
+            color: #f1f5f9;
+            background: rgba(255, 255, 255, 0.04);
+        }
+        
+        .admin-tab.active {
+            color: #f1f5f9;
+            background: rgba(124, 58, 237, 0.2);
+        }
+        
+        /* Tab Content */
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Tables */
+        .table-container {
+            background: #1a1a2e;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            overflow: hidden;
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        
+        table thead {
+            background: rgba(255, 255, 255, 0.02);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }
+        
+        table th {
+            padding: 12px 16px;
+            text-align: left;
+            color: #94a3b8;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        table td {
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+        }
+        
+        table tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        
+        .status-badge.success {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+        }
+        
+        .status-badge.pending {
+            background: rgba(245, 158, 11, 0.15);
+            color: #f59e0b;
+        }
+        
+        .status-badge.failed {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+        
+        .status-badge.playing {
+            background: rgba(59, 130, 246, 0.15);
+            color: #3b82f6;
+        }
+        
+        .status-badge.waiting {
+            background: rgba(148, 163, 184, 0.15);
+            color: #94a3b8;
+        }
+        
+        .status-badge.completed {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+        }
+        
+        .status-badge.active {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+        }
+        
+        .status-badge.inactive {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+        
+        .btn-action {
+            padding: 4px 12px;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+            margin: 0 2px;
+        }
+        
+        .btn-action.primary {
+            background: rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+        }
+        
+        .btn-action.primary:hover {
+            background: rgba(59, 130, 246, 0.3);
+        }
+        
+        .btn-action.success {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+        
+        .btn-action.success:hover {
+            background: rgba(16, 185, 129, 0.3);
+        }
+        
+        .btn-action.danger {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+        
+        .btn-action.danger:hover {
+            background: rgba(239, 68, 68, 0.3);
+        }
+        
+        .btn-action.warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+        }
+        
+        .btn-action.warning:hover {
+            background: rgba(245, 158, 11, 0.3);
+        }
+        
+        /* Search Bar */
+        .search-bar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        
+        .search-bar input {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px 14px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        
+        .search-bar input:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .search-bar input::placeholder {
+            color: #64748b;
+        }
+        
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .modal-overlay.active {
+            display: flex;
+        }
+        
+        .modal-box {
+            background: #1a1a2e;
+            padding: 32px;
+            border-radius: 16px;
+            max-width: 500px;
+            width: 100%;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .modal-box h2 {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+        
+        .modal-box .form-group {
+            margin-bottom: 14px;
+        }
+        
+        .modal-box .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #94a3b8;
+            margin-bottom: 4px;
+        }
+        
+        .modal-box .form-group input,
+        .modal-box .form-group select,
+        .modal-box .form-group textarea {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        
+        .modal-box .form-group input:focus,
+        .modal-box .form-group select:focus,
+        .modal-box .form-group textarea:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        
+        .modal-actions button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        
+        .modal-actions .btn-confirm {
+            background: linear-gradient(135deg, #fbbf24, #f59e0b);
+            color: #1a1a2e;
+        }
+        
+        .modal-actions .btn-confirm:hover {
+            transform: scale(1.02);
+        }
+        
+        .modal-actions .btn-cancel {
+            background: rgba(255, 255, 255, 0.06);
+            color: #94a3b8;
+        }
+        
+        .modal-actions .btn-cancel:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            padding: 14px 24px;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 14px;
+            z-index: 2000;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+            max-width: 400px;
+        }
+        
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+        
+        .toast.success {
+            background: rgba(16, 185, 129, 0.2);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+        
+        .toast.error {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+        
+        .toast.info {
+            background: rgba(59, 130, 246, 0.2);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+        }
+        
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #94a3b8;
+        }
+        
+        .loading-spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.04);
+            border-top-color: #fbbf24;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .admin-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .admin-tabs {
+                flex-direction: column;
+            }
+            
+            .admin-tab {
+                text-align: left;
+            }
+            
+            .login-box {
+                padding: 24px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .admin-container {
+                padding: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <?php if (!$isAdminLoggedIn): ?>
+    
+    <!-- ==============================================
+    ADMIN LOGIN PAGE
+    ============================================== -->
+    <div class="login-container">
+        <div class="login-box">
+            <h1>🔐 Admin Access</h1>
+            <p>Ludo Tournament Pro Command Center</p>
+            
+            <?php if (isset($loginError)): ?>
+                <div class="login-error"><?php echo htmlspecialchars($loginError); ?></div>
+            <?php endif; ?>
+            
+            <form method="POST" action="">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" placeholder="Enter admin username" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter admin password" required>
+                </div>
+                <button type="submit" name="admin_login" class="login-btn">Login to Dashboard</button>
+            </form>
+        </div>
+    </div>
+    
+    <?php else: ?>
+    
+    <!-- ==============================================
+    ADMIN DASHBOARD
+    ============================================== -->
+    <div class="admin-container">
+        
+        <!-- Header -->
+        <div class="admin-header">
+            <h1>⚡ Ludo Admin Command Center</h1>
+            <div class="admin-header-actions">
+                <span>👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
+                <a href="?logout=1">🚪 Logout</a>
+            </div>
+        </div>
+        
+        <!-- Stats Grid -->
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+                <div class="stat-label">Total Users</div>
+                <div class="stat-value blue" id="statTotalUsers">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Active Users (30d)</div>
+                <div class="stat-value green" id="statActiveUsers">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Active Tournaments</div>
+                <div class="stat-value purple" id="statActiveTournaments">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Matches</div>
+                <div class="stat-value" id="statTotalMatches">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Cashfree Collections</div>
+                <div class="stat-value gold" id="statCashfree">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Platform Revenue (15%)</div>
+                <div class="stat-value gold" id="statPlatformRevenue">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Net Platform Profit</div>
+                <div class="stat-value green" id="statNetProfit">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Today's Revenue</div>
+                <div class="stat-value gold" id="statTodayRevenue">...</div>
+            </div>
+        </div>
+        
+        <!-- Tabs -->
+        <div class="admin-tabs">
+            <button class="admin-tab active" data-tab="users">👥 Users</button>
+            <button class="admin-tab" data-tab="matches">🎯 Matches</button>
+            <button class="admin-tab" data-tab="transactions">💳 Transactions</button>
+            <button class="admin-tab" data-tab="settings">⚙️ Settings</button>
+        </div>
+        
+        <!-- Tab: Users -->
+        <div class="tab-content active" id="tab-users">
+            <div class="search-bar">
+                <input type="text" id="userSearch" placeholder="Search users by name, mobile, or email..." onkeyup="debounceSearch()">
+                <button class="btn-action primary" onclick="loadUsers()">🔄 Refresh</button>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Username</th>
+                            <th>Mobile</th>
+                            <th>Balance</th>
+                            <th>Matches</th>
+                            <th>Wins</th>
+                            <th>ELO</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usersTableBody">
+                        <tr><td colspan="9" class="loading">Loading users...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                <span id="userPaginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn-action primary" onclick="previousUsers()">← Prev</button>
+                    <button class="btn-action primary" onclick="nextUsers()">Next →</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Tab: Matches -->
+        <div class="tab-content" id="tab-matches">
+            <div class="search-bar">
+                <select id="matchStatusFilter" onchange="loadMatches()">
+                    <option value="">All Status</option>
+                    <option value="waiting">Waiting</option>
+                    <option value="ready">Ready</option>
+                    <option value="playing">Playing</option>
+                    <option value="completed">Completed</option>
+                    <option value="cancelled">Cancelled</option>
+                </select>
+                <button class="btn-action primary" onclick="loadMatches()">🔄 Refresh</button>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Room</th>
+                            <th>Entry Fee</th>
+                            <th>Prize Pool</th>
+                            <th>Platform Fee</th>
+                            <th>Status</th>
+                            <th>Players</th>
+                            <th>Winner</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="matchesTableBody">
+                        <tr><td colspan="9" class="loading">Loading matches...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Tab: Transactions -->
+        <div class="tab-content" id="tab-transactions">
+            <div class="search-bar">
+                <input type="number" id="txUserSearch" placeholder="Enter User ID to filter..." style="min-width: 150px;">
+                <button class="btn-action primary" onclick="loadTransactions()">🔍 Search</button>
+                <button class="btn-action primary" onclick="loadTransactions(0)">📋 All</button>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>User</th>
+                            <th>Amount</th>
+                            <th>Type</th>
+                            <th>Source</th>
+                            <th>Status</th>
+                            <th>Order ID</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="transactionsTableBody">
+                        <tr><td colspan="8" class="loading">Loading transactions...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Tab: Settings -->
+        <div class="tab-content" id="tab-settings">
+            <div style="background: #1a1a2e; padding: 24px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.04); max-width: 600px;">
+                <h2 style="font-size: 18px; margin-bottom: 16px;">⚙️ System Settings</h2>
+                
+                <div class="form-group">
+                    <label style="display: block; font-size: 13px; color: #94a3b8; margin-bottom: 4px;">Platform Fee (%)</label>
+                    <input type="number" id="platformFee" value="15" style="width: 100%; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(255,255,255,0.04); color: #f1f5f9; font-size: 14px; font-family: inherit;">
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; font-size: 13px; color: #94a3b8; margin-bottom: 4px;">Base URL</label>
+                    <input type="text" id="baseUrl" value="<?php echo BASE_URL; ?>" style="width: 100%; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(255,255,255,0.04); color: #f1f5f9; font-size: 14px; font-family: inherit;">
+                </div>
+                
+                <button class="btn-action success" onclick="saveSettings()" style="padding: 10px 24px; font-size: 14px;">💾 Save Settings</button>
+            </div>
+        </div>
+        
+    </div>
+    
+    <!-- ==============================================
+    MODAL: Edit User Balance
+    ============================================== -->
+    <div class="modal-overlay" id="balanceModal">
+        <div class="modal-box">
+            <h2>💰 Adjust User Balance</h2>
+            <form id="balanceForm">
+                <input type="hidden" id="balUserId" value="">
+                <div class="form-group">
+                    <label>User ID</label>
+                    <input type="text" id="balUserDisplay" disabled style="opacity: 0.6;">
+                </div>
+                <div class="form-group">
+                    <label>Current Balance</label>
+                    <input type="text" id="balCurrent" disabled style="opacity: 0.6;">
+                </div>
+                <div class="form-group">
+                    <label>Action</label>
+                    <select id="balType" style="width: 100%; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(255,255,255,0.04); color: #f1f5f9; font-size: 14px; font-family: inherit;">
+                        <option value="credit">Credit (+)</option>
+                        <option value="debit">Debit (-)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Amount (₹)</label>
+                    <input type="number" id="balAmount" placeholder="Enter amount" step="0.01" min="0.01" required>
+                </div>
+                <div class="form-group">
+                    <label>Reason</label>
+                    <input type="text" id="balReason" placeholder="Reason for adjustment">
+                </div>
+            </form>
+            <div class="modal-actions">
+                <button class="btn-confirm" onclick="submitBalance()">✅ Confirm</button>
+                <button class="btn-cancel" onclick="closeModal('balanceModal')">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- ==============================================
+    TOAST NOTIFICATION
+    ============================================== -->
+    <div class="toast" id="adminToast"></div>
+    
+    <!-- ==============================================
+    ADMIN JAVASCRIPT
+    ============================================== -->
+    <script>
+        // ==============================================
+        // STATE
+        // ==============================================
+        let state = {
+            usersPage: 0,
+            usersLimit: 50,
+            usersTotal: 0,
+            searchTimeout: null,
+        };
+        
+        // ==============================================
+        // DOM READY
+        // ==============================================
+        document.addEventListener('DOMContentLoaded', function() {
+            // Tab switching
+            document.querySelectorAll('.admin-tab').forEach(tab => {
+                tab.addEventListener('click', function() {
+                    document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
+                    this.classList.add('active');
+                    
+                    const tabId = this.dataset.tab;
+                    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                    document.getElementById('tab-' + tabId).classList.add('active');
+                    
+                    // Load data for tab
+                    if (tabId === 'users') loadUsers();
+                    else if (tabId === 'matches') loadMatches();
+                    else if (tabId === 'transactions') loadTransactions();
+                });
+            });
+            
+            // Initial load
+            loadStats();
+            loadUsers();
+        });
+        
+        // ==============================================
+        // LOAD STATS
+        // ==============================================
+        function loadStats() {
+            fetch('?ajax=1&action=get_stats')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        const s = data.data;
+                        document.getElementById('statTotalUsers').textContent = s.total_users || 0;
+                        document.getElementById('statActiveUsers').textContent = s.active_users || 0;
+                        document.getElementById('statActiveTournaments').textContent = s.active_tournaments || 0;
+                        document.getElementById('statTotalMatches').textContent = s.total_matches || 0;
+                        document.getElementById('statCashfree').textContent = '₹' + (s.cashfree_collections || 0).toFixed(2);
+                        document.getElementById('statPlatformRevenue').textContent = '₹' + (s.total_platform_revenue || 0).toFixed(2);
+                        document.getElementById('statNetProfit').textContent = '₹' + (s.net_platform_profit || 0).toFixed(2);
+                        document.getElementById('statTodayRevenue').textContent = '₹' + (s.today_revenue || 0).toFixed(2);
+                    }
+                })
+                .catch(() => {});
+        }
+        
+        // ==============================================
+        // LOAD USERS
+        // ==============================================
+        function loadUsers() {
+            const search = document.getElementById('userSearch').value;
+            const offset = state.usersPage * state.usersLimit;
+            
+            document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="9" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
+            
+            fetch(`?ajax=1&action=get_users&offset=${offset}&limit=${state.usersLimit}&search=${encodeURIComponent(search)}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        state.usersTotal = data.data.total;
+                        renderUsers(data.data.users);
+                        document.getElementById('userPaginationInfo').textContent = 
+                            `Showing ${offset + 1} - ${Math.min(offset + state.usersLimit, state.usersTotal)} of ${state.usersTotal} users`;
+                    } else {
+                        document.getElementById('usersTableBody').innerHTML = `<tr><td colspan="9" style="color: #ef4444;">${data.message}</td></tr>`;
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="9" style="color: #ef4444;">Failed to load users</td></tr>';
+                });
+        }
+        
+        function renderUsers(users) {
+            const tbody = document.getElementById('usersTableBody');
+            if (!users || users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" style="color: #94a3b8; text-align: center;">No users found</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = users.map(u => `
+                <tr>
+                    <td>#${u.id}</td>
+                    <td>${escapeHtml(u.username)}</td>
+                    <td>${escapeHtml(u.mobile)}</td>
+                    <td><strong style="color: #fbbf24;">₹${parseFloat(u.wallet_balance).toFixed(2)}</strong></td>
+                    <td>${u.total_matches_played || 0}</td>
+                    <td>${u.total_matches_won || 0}</td>
+                    <td>${u.elo_rating || 1200}</td>
+                    <td>
+                        <span class="status-badge ${u.is_active ? 'active' : 'inactive'}">
+                            ${u.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                    </td>
+                    <td>
+                        <button class="btn-action primary" onclick="editBalance(${u.id}, '${escapeHtml(u.username)}', ${u.wallet_balance})">💰</button>
+                        <button class="btn-action ${u.is_active ? 'danger' : 'success'}" onclick="toggleUser(${u.id})">
+                            ${u.is_active ? '🔒' : '🔓'}
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        function previousUsers() {
+            if (state.usersPage > 0) {
+                state.usersPage--;
+                loadUsers();
+            }
+        }
+        
+        function nextUsers() {
+            if ((state.usersPage + 1) * state.usersLimit < state.usersTotal) {
+                state.usersPage++;
+                loadUsers();
+            }
+        }
+        
+        function debounceSearch() {
+            clearTimeout(state.searchTimeout);
+            state.searchTimeout = setTimeout(() => {
+                state.usersPage = 0;
+                loadUsers();
+            }, 400);
+        }
+        
+        // ==============================================
+        // LOAD MATCHES
+        // ==============================================
+        function loadMatches() {
+            const status = document.getElementById('matchStatusFilter').value;
+            
+            document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="9" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
+            
+            fetch(`?ajax=1&action=get_matches&status=${encodeURIComponent(status)}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        renderMatches(data.data.matches);
+                    } else {
+                        document.getElementById('matchesTableBody').innerHTML = `<tr><td colspan="9" style="color: #ef4444;">${data.message}</td></tr>`;
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="9" style="color: #ef4444;">Failed to load matches</td></tr>';
+                });
+        }
+        
+        function renderMatches(matches) {
+            const tbody = document.getElementById('matchesTableBody');
+            if (!matches || matches.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" style="color: #94a3b8; text-align: center;">No matches found</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = matches.map(m => `
+                <tr>
+                    <td>#${m.id}</td>
+                    <td><code style="background: rgba(255,255,255,0.04); padding: 2px 8px; border-radius: 4px;">${escapeHtml(m.room_code)}</code></td>
+                    <td>₹${parseFloat(m.entry_fee).toFixed(2)}</td>
+                    <td>₹${parseFloat(m.prize_pool).toFixed(2)}</td>
+                    <td>₹${parseFloat(m.platform_fee).toFixed(2)}</td>
+                    <td><span class="status-badge ${m.status}">${m.status}</span></td>
+                    <td>${escapeHtml(m.player1_name)} ${m.player2_name ? 'vs ' + escapeHtml(m.player2_name) : ''}</td>
+                    <td>${m.winner_name ? escapeHtml(m.winner_name) + ' (₹' + parseFloat(m.winning_amount || 0).toFixed(2) + ')' : '-'}</td>
+                    <td style="font-size: 12px; color: #94a3b8;">${m.created_at ? new Date(m.created_at).toLocaleDateString() : '-'}</td>
+                </tr>
+            `).join('');
+        }
+        
+        // ==============================================
+        // LOAD TRANSACTIONS
+        // ==============================================
+        function loadTransactions(userId) {
+            const uid = userId || document.getElementById('txUserSearch').value || 0;
+            
+            document.getElementById('transactionsTableBody').innerHTML = '<tr><td colspan="8" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
+            
+            const url = uid > 0 ? `?ajax=1&action=get_transactions&user_id=${uid}` : `?ajax=1&action=get_transactions`;
+            
+            fetch(url)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        renderTransactions(data.data);
+                    } else {
+                        document.getElementById('transactionsTableBody').innerHTML = `<tr><td colspan="8" style="color: #ef4444;">${data.message}</td></tr>`;
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('transactionsTableBody').innerHTML = '<tr><td colspan="8" style="color: #ef4444;">Failed to load transactions</td></tr>';
+                });
+        }
+        
+        function renderTransactions(transactions) {
+            const tbody = document.getElementById('transactionsTableBody');
+            if (!transactions || transactions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="color: #94a3b8; text-align: center;">No transactions found</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = transactions.map(t => `
+                <tr>
+                    <td>#${t.id}</td>
+                    <td>User #${t.user_id}</td>
+                    <td style="color: ${t.type === 'credit' ? '#10b981' : '#ef4444'};">${t.type === 'credit' ? '+' : '-'}₹${parseFloat(t.amount).toFixed(2)}</td>
+                    <td><span style="text-transform: capitalize;">${t.type}</span></td>
+                    <td><span style="text-transform: capitalize;">${t.source}</span></td>
+                    <td><span class="status-badge ${t.status}">${t.status}</span></td>
+                    <td style="font-size: 11px; color: #94a3b8;">${escapeHtml(t.order_id)}</td>
+                    <td style="font-size: 12px; color: #94a3b8;">${t.created_at ? new Date(t.created_at).toLocaleString() : '-'}</td>
+                </tr>
+            `).join('');
+        }
+        
+        // ==============================================
+        // EDIT BALANCE MODAL
+        // ==============================================
+        function editBalance(userId, username, currentBalance) {
+            document.getElementById('balUserId').value = userId;
+            document.getElementById('balUserDisplay').value = `#${userId} - ${username}`;
+            document.getElementById('balCurrent').value = `₹${currentBalance.toFixed(2)}`;
+            document.getElementById('balAmount').value = '';
+            document.getElementById('balReason').value = '';
+            document.getElementById('balType').value = 'credit';
+            
+            document.getElementById('balanceModal').classList.add('active');
+        }
+        
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+        
+        function submitBalance() {
+            const userId = document.getElementById('balUserId').value;
+            const amount = parseFloat(document.getElementById('balAmount').value);
+            const type = document.getElementById('balType').value;
+            const reason = document.getElementById('balReason').value || 'Admin adjustment';
+            
+            if (!userId || !amount || amount <= 0) {
+                showToast('Please enter a valid amount', 'error');
+                return;
+            }
+            
+            fetch('?ajax=1&action=update_balance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: parseInt(userId),
+                    amount: amount,
+                    type: type,
+                    reason: reason
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    showToast('Balance updated successfully!', 'success');
+                    closeModal('balanceModal');
+                    loadUsers();
+                    loadStats();
+                } else {
+                    showToast(data.message || 'Update failed', 'error');
+                }
+            })
+            .catch(() => {
+                showToast('Network error', 'error');
+            });
+        }
+        
+        // ==============================================
+        // TOGGLE USER
+        // ==============================================
+        function toggleUser(userId) {
+            if (!confirm('Toggle user status?')) return;
+            
+            fetch('?ajax=1&action=toggle_user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    showToast('User status toggled', 'success');
+                    loadUsers();
+                } else {
+                    showToast(data.message || 'Toggle failed', 'error');
+                }
+            })
+            .catch(() => {
+                showToast('Network error', 'error');
+            });
+        }
+        
+        // ==============================================
+        // SAVE SETTINGS
+        // ==============================================
+        function saveSettings() {
+            const platformFee = document.getElementById('platformFee').value;
+            const baseUrl = document.getElementById('baseUrl').value;
+            
+            // In production, this would save to database or config file
+            showToast('Settings saved successfully (Demo)', 'success');
+        }
+        
+        // ==============================================
+        // TOAST NOTIFICATIONS
+        // ==============================================
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('adminToast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type + ' show';
+            
+            clearTimeout(toast._timeout);
+            toast._timeout = setTimeout(() => {
+                toast.classList.remove('show');
+            }, 4000);
+        }
+        
+        // ==============================================
+        // UTILITY: Escape HTML
+        // ==============================================
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+        
+        // ==============================================
+        // CLOSE MODAL ON OVERLAY CLICK
+        // ==============================================
+        document.querySelectorAll('.modal-overlay').forEach(modal => {
+            modal.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    this.classList.remove('active');
+                }
+            });
+        });
+        
+        // ==============================================
+        // KEYBOARD SHORTCUTS
+        // ==============================================
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
+            }
+            if (e.key === 'r' && e.ctrlKey) {
+                e.preventDefault();
+                loadStats();
+                loadUsers();
+            }
+        });
+    </script>
+    
+    <?php endif; ?>
+    
+</body>
+</html>
