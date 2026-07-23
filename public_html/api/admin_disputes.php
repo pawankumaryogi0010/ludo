@@ -1,9 +1,9 @@
 <?php
 /**
  * ======================================================
- * ADMIN_DISPUTES.PHP - Dispute & Ticket Management API
+ * ADMIN_DISPUTES.PHP - Dispute & Refund Management API
  * Ludo Tournament Platform - Admin Dispute Resolution
- * Version: 2.0.0
+ * Version: 2.0.0 - COMPLETE
  * ======================================================
  */
 
@@ -30,6 +30,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 session_start();
 
+// ==============================================
+// AUTHENTICATION & AUTHORIZATION
+// ==============================================
 if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
     jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
 }
@@ -38,28 +41,36 @@ try {
     $db = Database::getInstance();
     $conn = $db->getConnection();
     
+    // Verify admin with database session token
     $stmt = $conn->prepare("
-        SELECT id, username, is_admin, is_active 
-        FROM users 
-        WHERE id = :admin_id 
-        AND is_admin = 1 
-        AND is_active = 1
+        SELECT u.id, u.username, u.is_admin, u.is_active 
+        FROM users u
+        JOIN sessions s ON u.id = s.user_id
+        WHERE u.id = :admin_id 
+        AND u.is_admin = 1 
+        AND u.is_active = 1
+        AND s.session_token = :token
+        AND s.is_active = 1
+        AND s.expires_at > NOW()
     ");
-    $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
+    $stmt->execute([
+        ':admin_id' => $_SESSION['admin_id'],
+        ':token' => $_SESSION['admin_token']
+    ]);
     $admin = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$admin) {
-        jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
-    }
-    
-    if ($_SESSION['admin_token'] !== hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-        jsonResponse(false, 'Invalid session - Please login again', [], 401);
+        http_response_code(401);
+        jsonResponse(false, 'Unauthorized - Invalid admin session', [], 401);
     }
     
 } catch (Exception $e) {
     jsonResponse(false, 'Authentication error: ' . $e->getMessage(), [], 500);
 }
 
+// ==============================================
+// ROUTING
+// ==============================================
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 switch ($action) {
@@ -87,6 +98,15 @@ switch ($action) {
     case 'get_stats':
         handleStats();
         break;
+    case 'declare_winner':
+        handleDeclareWinner();
+        break;
+    case 'refund_match':
+        handleRefundMatch();
+        break;
+    case 'send_reply':
+        handleSendReply();
+        break;
     default:
         jsonResponse(false, 'Invalid action specified', [], 400);
         break;
@@ -102,6 +122,7 @@ function handleList() {
     $limit = intval($_GET['limit'] ?? 50);
     $offset = intval($_GET['offset'] ?? 0);
     $priority = isset($_GET['priority']) ? $_GET['priority'] : '';
+    $search = isset($_GET['search']) ? '%' . $_GET['search'] . '%' : '';
     
     try {
         $where = "1=1";
@@ -117,7 +138,12 @@ function handleList() {
             $params[':priority'] = $priority;
         }
         
-        $stmt = $conn->prepare("SELECT COUNT(*) as total FROM dispute_tickets dt WHERE {$where}");
+        if (!empty($search)) {
+            $where .= " AND (dt.ticket_number LIKE :search OR dt.subject LIKE :search OR dt.description LIKE :search OR u.username LIKE :search)";
+            $params[':search'] = $search;
+        }
+        
+        $stmt = $conn->prepare("SELECT COUNT(*) as total FROM dispute_tickets dt LEFT JOIN users u ON dt.user_id = u.id WHERE {$where}");
         $stmt->execute($params);
         $total = intval($stmt->fetchColumn());
         
@@ -700,5 +726,208 @@ function handleStats() {
     } catch (PDOException $e) {
         jsonResponse(false, 'Database error: ' . $e->getMessage(), [], 500);
     }
+}
+
+// ==============================================
+// HANDLER: Declare Winner (Additional)
+// ==============================================
+function handleDeclareWinner() {
+    global $db, $conn;
+    
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input || !isset($input['match_id']) || !isset($input['winner_id'])) {
+        jsonResponse(false, 'Missing required fields', [], 400);
+    }
+    
+    $matchId = intval($input['match_id']);
+    $winnerId = intval($input['winner_id']);
+    
+    $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+    if (!CSRFToken::validate($csrfToken)) {
+        jsonResponse(false, 'Invalid CSRF token', [], 403);
+    }
+    
+    try {
+        $db->beginTransaction();
+        
+        // Get match details
+        $stmt = $conn->prepare("
+            SELECT entry_fee, prize_pool, status, player1_id, player2_id 
+            FROM matches 
+            WHERE id = :match_id 
+            FOR UPDATE
+        ");
+        $stmt->execute([':match_id' => $matchId]);
+        $match = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$match) {
+            $db->rollback();
+            jsonResponse(false, 'Match not found', [], 404);
+        }
+        
+        if ($match['status'] === 'completed') {
+            $db->rollback();
+            jsonResponse(false, 'Match already completed', [], 400);
+        }
+        
+        // Update match
+        $stmt = $conn->prepare("
+            UPDATE matches 
+            SET 
+                winner_id = :winner_id,
+                status = 'completed',
+                completed_at = CURRENT_TIMESTAMP
+            WHERE id = :match_id
+        ");
+        $stmt->execute([
+            ':winner_id' => $winnerId,
+            ':match_id' => $matchId
+        ]);
+        
+        $db->commit();
+        
+        jsonResponse(true, 'Winner declared successfully', [
+            'match_id' => $matchId,
+            'winner_id' => $winnerId
+        ]);
+        
+    } catch (PDOException $e) {
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
+        jsonResponse(false, 'Database error: ' . $e->getMessage(), [], 500);
+    }
+}
+
+// ==============================================
+// HANDLER: Refund Match (Additional)
+// ==============================================
+function handleRefundMatch() {
+    global $db, $conn;
+    
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input || !isset($input['match_id'])) {
+        jsonResponse(false, 'Missing match ID', [], 400);
+    }
+    
+    $matchId = intval($input['match_id']);
+    
+    $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+    if (!CSRFToken::validate($csrfToken)) {
+        jsonResponse(false, 'Invalid CSRF token', [], 403);
+    }
+    
+    try {
+        $db->beginTransaction();
+        
+        // Get match details
+        $stmt = $conn->prepare("
+            SELECT entry_fee, player1_id, player2_id, player3_id, player4_id, status 
+            FROM matches 
+            WHERE id = :match_id 
+            FOR UPDATE
+        ");
+        $stmt->execute([':match_id' => $matchId]);
+        $match = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$match) {
+            $db->rollback();
+            jsonResponse(false, 'Match not found', [], 404);
+        }
+        
+        $players = array_filter([
+            $match['player1_id'],
+            $match['player2_id'],
+            $match['player3_id'],
+            $match['player4_id']
+        ]);
+        
+        $refundAmount = $match['entry_fee'];
+        
+        // Refund all players
+        foreach ($players as $playerId) {
+            $stmt = $conn->prepare("
+                UPDATE users 
+                SET wallet_balance = wallet_balance + :amount, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = :user_id
+            ");
+            $stmt->execute([
+                ':amount' => $refundAmount,
+                ':user_id' => $playerId
+            ]);
+            
+            // Record refund transaction
+            $orderId = 'REFUND-MATCH-' . strtoupper(uniqid());
+            $stmt = $conn->prepare("
+                INSERT INTO transactions (
+                    user_id,
+                    amount,
+                    type,
+                    source,
+                    description,
+                    order_id,
+                    status,
+                    balance_before,
+                    balance_after,
+                    metadata,
+                    created_at
+                ) VALUES (
+                    :user_id,
+                    :amount,
+                    'credit',
+                    'refund',
+                    :description,
+                    :order_id,
+                    'success',
+                    (SELECT wallet_balance FROM users WHERE id = :user_id) - :amount,
+                    (SELECT wallet_balance FROM users WHERE id = :user_id),
+                    :metadata,
+                    CURRENT_TIMESTAMP
+                )
+            ");
+            $stmt->execute([
+                ':user_id' => $playerId,
+                ':amount' => $refundAmount,
+                ':description' => "Match refund for match #{$matchId}",
+                ':order_id' => $orderId,
+                ':metadata' => json_encode([
+                    'match_id' => $matchId,
+                    'action' => 'refund_match'
+                ])
+            ]);
+        }
+        
+        // Update match status
+        $stmt = $conn->prepare("
+            UPDATE matches 
+            SET 
+                status = 'cancelled',
+                completed_at = CURRENT_TIMESTAMP
+            WHERE id = :match_id
+        ");
+        $stmt->execute([':match_id' => $matchId]);
+        
+        $db->commit();
+        
+        jsonResponse(true, 'Match refunded successfully', [
+            'match_id' => $matchId,
+            'players_refunded' => count($players),
+            'amount_per_player' => $refundAmount
+        ]);
+        
+    } catch (PDOException $e) {
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
+        jsonResponse(false, 'Database error: ' . $e->getMessage(), [], 500);
+    }
+}
+
+// ==============================================
+// HANDLER: Send Reply (Alias for add_message)
+// ==============================================
+function handleSendReply() {
+    // Alias for add_message
+    handleAddMessage();
 }
 ?>
