@@ -1,9 +1,9 @@
 <?php
 /**
  * ======================================================
- * ADMIN INDEX.PHP - Pro Command Center
+ * ADMIN INDEX.PHP - Pro Command Center (FULLY INTEGRATED)
  * Ludo Tournament Platform - Admin Dashboard
- * Version: 1.0.0
+ * Version: 2.0.0
  * ======================================================
  */
 
@@ -128,6 +128,18 @@ function handleAdminAjax() {
             case 'get_matches':
                 $response = getMatchesList($db, $conn);
                 break;
+            case 'get_kyc_stats':
+                $response = getKycStats($db, $conn);
+                break;
+            case 'get_withdrawal_stats':
+                $response = getWithdrawalStats($db, $conn);
+                break;
+            case 'get_dispute_stats':
+                $response = getDisputeStats($db, $conn);
+                break;
+            case 'get_financial_metrics':
+                $response = getFinancialMetrics($db, $conn);
+                break;
             default:
                 $response['message'] = 'Unknown action';
         }
@@ -141,7 +153,7 @@ function handleAdminAjax() {
 }
 
 // ==============================================
-// ADMIN STATS
+// ADMIN STATS (ENHANCED)
 // ==============================================
 function getAdminStats($db, $conn) {
     $stats = [];
@@ -211,17 +223,175 @@ function getAdminStats($db, $conn) {
     // Pending Withdrawals
     $stmt = $conn->query("
         SELECT COUNT(*) as pending 
-        FROM transactions 
-        WHERE source = 'withdrawal' 
-        AND status = 'pending'
+        FROM withdrawals 
+        WHERE status = 'pending'
     ");
     $stats['pending_withdrawals'] = intval($stmt->fetchColumn());
+    
+    // Pending KYC
+    $stmt = $conn->query("
+        SELECT COUNT(*) as pending 
+        FROM kyc_documents 
+        WHERE status = 'pending'
+    ");
+    $stats['pending_kyc'] = intval($stmt->fetchColumn());
+    
+    // Open Disputes
+    $stmt = $conn->query("
+        SELECT COUNT(*) as open 
+        FROM dispute_tickets 
+        WHERE status IN ('open', 'investigating')
+    ");
+    $stats['open_disputes'] = intval($stmt->fetchColumn());
+    
+    // Total TDS Deducted
+    $stmt = $conn->query("
+        SELECT SUM(tds_amount) as total 
+        FROM tds_transactions
+    ");
+    $stats['total_tds'] = floatval($stmt->fetchColumn());
     
     return ['success' => true, 'data' => $stats];
 }
 
 // ==============================================
-GET USERS LIST
+// GET KYC STATS
+// ==============================================
+function getKycStats($db, $conn) {
+    try {
+        $stats = [];
+        
+        $stmt = $conn->query("SELECT COUNT(*) as pending FROM kyc_documents WHERE status = 'pending'");
+        $stats['pending'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as verified FROM kyc_documents WHERE status = 'verified'");
+        $stats['verified'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as rejected FROM kyc_documents WHERE status = 'rejected'");
+        $stats['rejected'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as total FROM kyc_documents");
+        $stats['total'] = intval($stmt->fetchColumn());
+        
+        return ['success' => true, 'data' => $stats];
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+// ==============================================
+// GET WITHDRAWAL STATS
+// ==============================================
+function getWithdrawalStats($db, $conn) {
+    try {
+        $stats = [];
+        
+        $stmt = $conn->query("SELECT COUNT(*) as pending FROM withdrawals WHERE status = 'pending'");
+        $stats['pending'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as processing FROM withdrawals WHERE status = 'processing'");
+        $stats['processing'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as approved FROM withdrawals WHERE status = 'approved'");
+        $stats['approved'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as completed FROM withdrawals WHERE status = 'completed'");
+        $stats['completed'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT SUM(amount) as total_pending FROM withdrawals WHERE status = 'pending'");
+        $stats['total_pending_amount'] = floatval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT SUM(amount) as total_processed FROM withdrawals WHERE status IN ('approved', 'completed')");
+        $stats['total_processed_amount'] = floatval($stmt->fetchColumn());
+        
+        return ['success' => true, 'data' => $stats];
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+// ==============================================
+// GET DISPUTE STATS
+// ==============================================
+function getDisputeStats($db, $conn) {
+    try {
+        $stats = [];
+        
+        $stmt = $conn->query("SELECT COUNT(*) as open FROM dispute_tickets WHERE status = 'open'");
+        $stats['open'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as investigating FROM dispute_tickets WHERE status = 'investigating'");
+        $stats['investigating'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as resolved FROM dispute_tickets WHERE status = 'resolved'");
+        $stats['resolved'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as closed FROM dispute_tickets WHERE status = 'closed'");
+        $stats['closed'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("SELECT COUNT(*) as total FROM dispute_tickets");
+        $stats['total'] = intval($stmt->fetchColumn());
+        
+        return ['success' => true, 'data' => $stats];
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+// ==============================================
+// GET FINANCIAL METRICS
+// ==============================================
+function getFinancialMetrics($db, $conn) {
+    try {
+        $days = intval($_GET['days'] ?? 30);
+        
+        $stmt = $conn->prepare("
+            SELECT 
+                metric_date,
+                daily_deposits,
+                daily_withdrawals,
+                daily_platform_revenue,
+                daily_matches_played,
+                daily_new_users,
+                total_platform_liability,
+                total_user_balance,
+                total_tds_deducted
+            FROM financial_metrics
+            WHERE metric_date >= DATE_SUB(CURDATE(), INTERVAL :days DAY)
+            ORDER BY metric_date ASC
+        ");
+        $stmt->execute([':days' => $days]);
+        $metrics = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Get current totals
+        $stmt = $conn->query("
+            SELECT 
+                SUM(wallet_balance) as total_balance,
+                SUM(total_earnings) as total_earnings,
+                SUM(total_withdrawn) as total_withdrawn
+            FROM users 
+            WHERE is_admin = 0
+        ");
+        $totals = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        return [
+            'success' => true,
+            'data' => [
+                'history' => $metrics,
+                'totals' => [
+                    'total_user_balance' => floatval($totals['total_balance'] ?? 0),
+                    'total_earnings' => floatval($totals['total_earnings'] ?? 0),
+                    'total_withdrawn' => floatval($totals['total_withdrawn'] ?? 0)
+                ]
+            ]
+        ];
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+// ==============================================
+// GET USERS LIST
 // ==============================================
 function getUsersList($db, $conn) {
     $limit = intval($_GET['limit'] ?? 50);
@@ -252,8 +422,10 @@ function getUsersList($db, $conn) {
             total_matches_played,
             total_matches_won,
             total_earnings,
+            total_withdrawn,
             elo_rating,
             is_verified,
+            kyc_status,
             is_active,
             created_at,
             last_login
@@ -530,6 +702,7 @@ function getMatchesList($db, $conn) {
             m.player2_name,
             m.winner_name,
             m.winning_amount,
+            m.tds_deducted,
             m.turn_number,
             m.created_at,
             m.started_at,
@@ -568,7 +741,7 @@ function getMatchesList($db, $conn) {
     <title>Admin Command Center - Ludo Tournament Pro</title>
     <style>
         /* ==============================================
-           ADMIN STYLES
+           ADMIN STYLES (FULLY ENHANCED)
            ============================================== */
         * {
             margin: 0;
@@ -707,6 +880,7 @@ function getMatchesList($db, $conn) {
             display: flex;
             align-items: center;
             gap: 16px;
+            flex-wrap: wrap;
         }
         
         .admin-header-actions span {
@@ -715,42 +889,52 @@ function getMatchesList($db, $conn) {
         }
         
         .admin-header-actions a {
-            color: #ef4444;
+            color: #94a3b8;
             text-decoration: none;
             font-weight: 600;
             font-size: 14px;
             padding: 8px 16px;
-            border: 1px solid rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.06);
             border-radius: 8px;
             transition: background 0.2s;
         }
         
         .admin-header-actions a:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+        
+        .admin-header-actions a.logout {
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+        
+        .admin-header-actions a.logout:hover {
             background: rgba(239, 68, 68, 0.1);
         }
         
         /* Stats Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 16px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
             margin-bottom: 24px;
         }
         
         .stat-card {
             background: #1a1a2e;
-            padding: 20px 24px;
-            border-radius: 14px;
+            padding: 16px 20px;
+            border-radius: 12px;
             border: 1px solid rgba(255, 255, 255, 0.04);
             transition: border-color 0.2s;
+            cursor: pointer;
         }
         
         .stat-card:hover {
-            border-color: rgba(251, 191, 36, 0.2);
+            border-color: rgba(251, 191, 36, 0.15);
         }
         
         .stat-card .stat-label {
-            font-size: 12px;
+            font-size: 11px;
             color: #94a3b8;
             text-transform: uppercase;
             letter-spacing: 0.5px;
@@ -758,29 +942,62 @@ function getMatchesList($db, $conn) {
         }
         
         .stat-card .stat-value {
-            font-size: 28px;
+            font-size: 24px;
             font-weight: 800;
             margin-top: 4px;
         }
         
-        .stat-card .stat-value.gold {
-            color: #fbbf24;
+        .stat-card .stat-value.gold { color: #fbbf24; }
+        .stat-card .stat-value.green { color: #10b981; }
+        .stat-card .stat-value.blue { color: #3b82f6; }
+        .stat-card .stat-value.purple { color: #8b5cf6; }
+        .stat-card .stat-value.red { color: #ef4444; }
+        .stat-card .stat-value.orange { color: #f59e0b; }
+        .stat-card .stat-value.cyan { color: #06b6d4; }
+        
+        /* Quick Action Cards */
+        .quick-actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
         }
         
-        .stat-card .stat-value.green {
-            color: #10b981;
+        .quick-action {
+            background: #1a1a2e;
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            color: #f1f5f9;
         }
         
-        .stat-card .stat-value.blue {
-            color: #3b82f6;
+        .quick-action:hover {
+            border-color: rgba(124, 58, 237, 0.3);
+            transform: translateY(-2px);
         }
         
-        .stat-card .stat-value.purple {
-            color: #8b5cf6;
+        .quick-action .icon {
+            font-size: 28px;
+            display: block;
+            margin-bottom: 6px;
         }
         
-        .stat-card .stat-value.red {
-            color: #ef4444;
+        .quick-action .label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #94a3b8;
+        }
+        
+        .quick-action .count {
+            font-size: 18px;
+            font-weight: 700;
+            color: #f1f5f9;
+            display: block;
+            margin-top: 2px;
         }
         
         /* Tabs */
@@ -821,11 +1038,11 @@ function getMatchesList($db, $conn) {
         /* Tab Content */
         .tab-content {
             display: none;
+            animation: fadeIn 0.3s ease;
         }
         
         .tab-content.active {
             display: block;
-            animation: fadeIn 0.3s ease;
         }
         
         @keyframes fadeIn {
@@ -880,45 +1097,18 @@ function getMatchesList($db, $conn) {
             font-weight: 600;
         }
         
-        .status-badge.success {
-            background: rgba(16, 185, 129, 0.15);
-            color: #10b981;
-        }
-        
-        .status-badge.pending {
-            background: rgba(245, 158, 11, 0.15);
-            color: #f59e0b;
-        }
-        
-        .status-badge.failed {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-        }
-        
-        .status-badge.playing {
-            background: rgba(59, 130, 246, 0.15);
-            color: #3b82f6;
-        }
-        
-        .status-badge.waiting {
-            background: rgba(148, 163, 184, 0.15);
-            color: #94a3b8;
-        }
-        
-        .status-badge.completed {
-            background: rgba(16, 185, 129, 0.15);
-            color: #10b981;
-        }
-        
-        .status-badge.active {
-            background: rgba(16, 185, 129, 0.15);
-            color: #10b981;
-        }
-        
-        .status-badge.inactive {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-        }
+        .status-badge.success { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .status-badge.pending { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+        .status-badge.failed { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        .status-badge.playing { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+        .status-badge.waiting { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+        .status-badge.completed { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .status-badge.active { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .status-badge.inactive { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        .status-badge.verified { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .status-badge.rejected { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        .status-badge.open { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        .status-badge.resolved { background: rgba(16, 185, 129, 0.15); color: #10b981; }
         
         .btn-action {
             padding: 4px 12px;
@@ -932,41 +1122,14 @@ function getMatchesList($db, $conn) {
             margin: 0 2px;
         }
         
-        .btn-action.primary {
-            background: rgba(59, 130, 246, 0.2);
-            color: #3b82f6;
-        }
-        
-        .btn-action.primary:hover {
-            background: rgba(59, 130, 246, 0.3);
-        }
-        
-        .btn-action.success {
-            background: rgba(16, 185, 129, 0.2);
-            color: #10b981;
-        }
-        
-        .btn-action.success:hover {
-            background: rgba(16, 185, 129, 0.3);
-        }
-        
-        .btn-action.danger {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-        }
-        
-        .btn-action.danger:hover {
-            background: rgba(239, 68, 68, 0.3);
-        }
-        
-        .btn-action.warning {
-            background: rgba(245, 158, 11, 0.2);
-            color: #f59e0b;
-        }
-        
-        .btn-action.warning:hover {
-            background: rgba(245, 158, 11, 0.3);
-        }
+        .btn-action.primary { background: rgba(59, 130, 246, 0.2); color: #3b82f6; }
+        .btn-action.primary:hover { background: rgba(59, 130, 246, 0.3); }
+        .btn-action.success { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+        .btn-action.success:hover { background: rgba(16, 185, 129, 0.3); }
+        .btn-action.danger { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .btn-action.danger:hover { background: rgba(239, 68, 68, 0.3); }
+        .btn-action.warning { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .btn-action.warning:hover { background: rgba(245, 158, 11, 0.3); }
         
         /* Search Bar */
         .search-bar {
@@ -976,9 +1139,9 @@ function getMatchesList($db, $conn) {
             flex-wrap: wrap;
         }
         
-        .search-bar input {
+        .search-bar input, .search-bar select {
             flex: 1;
-            min-width: 200px;
+            min-width: 150px;
             padding: 10px 14px;
             border: 1px solid rgba(255, 255, 255, 0.06);
             border-radius: 10px;
@@ -988,13 +1151,17 @@ function getMatchesList($db, $conn) {
             font-family: inherit;
         }
         
-        .search-bar input:focus {
+        .search-bar input:focus, .search-bar select:focus {
             outline: none;
             border-color: #7c3aed;
         }
         
         .search-bar input::placeholder {
             color: #64748b;
+        }
+        
+        .search-bar select option {
+            background: #1a1a2e;
         }
         
         /* Modal */
@@ -1123,23 +1290,9 @@ function getMatchesList($db, $conn) {
             opacity: 1;
         }
         
-        .toast.success {
-            background: rgba(16, 185, 129, 0.2);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            color: #10b981;
-        }
-        
-        .toast.error {
-            background: rgba(239, 68, 68, 0.2);
-            border: 1px solid rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-        }
-        
-        .toast.info {
-            background: rgba(59, 130, 246, 0.2);
-            border: 1px solid rgba(59, 130, 246, 0.2);
-            color: #3b82f6;
-        }
+        .toast.success { background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.2); color: #10b981; }
+        .toast.error { background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .toast.info { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; }
         
         /* Loading */
         .loading {
@@ -1168,6 +1321,10 @@ function getMatchesList($db, $conn) {
                 grid-template-columns: repeat(2, 1fr);
             }
             
+            .quick-actions {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
             .admin-header {
                 flex-direction: column;
                 align-items: flex-start;
@@ -1188,6 +1345,10 @@ function getMatchesList($db, $conn) {
         
         @media (max-width: 480px) {
             .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .quick-actions {
                 grid-template-columns: 1fr;
             }
             
@@ -1238,8 +1399,36 @@ function getMatchesList($db, $conn) {
             <h1>⚡ Ludo Admin Command Center</h1>
             <div class="admin-header-actions">
                 <span>👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
-                <a href="?logout=1">🚪 Logout</a>
+                <a href="settings.php" title="System Settings">⚙️ Settings</a>
+                <a href="kyc.php" title="KYC Management">🛡️ KYC</a>
+                <a href="withdrawals.php" title="Withdrawals">🏦 Withdrawals</a>
+                <a href="disputes.php" title="Disputes">📋 Disputes</a>
+                <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
+        </div>
+        
+        <!-- Quick Action Cards -->
+        <div class="quick-actions">
+            <a href="kyc.php" class="quick-action">
+                <span class="icon">🛡️</span>
+                <span class="label">KYC Pending</span>
+                <span class="count" id="quickKyc">...</span>
+            </a>
+            <a href="withdrawals.php" class="quick-action">
+                <span class="icon">🏦</span>
+                <span class="label">Withdrawals Pending</span>
+                <span class="count" id="quickWithdrawals">...</span>
+            </a>
+            <a href="disputes.php" class="quick-action">
+                <span class="icon">📋</span>
+                <span class="label">Open Disputes</span>
+                <span class="count" id="quickDisputes">...</span>
+            </a>
+            <a href="settings.php" class="quick-action">
+                <span class="icon">⚙️</span>
+                <span class="label">Maintenance</span>
+                <span class="count" id="quickMaintenance">Off</span>
+            </a>
         </div>
         
         <!-- Stats Grid -->
@@ -1258,14 +1447,14 @@ function getMatchesList($db, $conn) {
             </div>
             <div class="stat-card">
                 <div class="stat-label">Total Matches</div>
-                <div class="stat-value" id="statTotalMatches">...</div>
+                <div class="stat-value cyan" id="statTotalMatches">...</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Cashfree Collections</div>
                 <div class="stat-value gold" id="statCashfree">...</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Platform Revenue (15%)</div>
+                <div class="stat-label">Platform Revenue</div>
                 <div class="stat-value gold" id="statPlatformRevenue">...</div>
             </div>
             <div class="stat-card">
@@ -1276,6 +1465,22 @@ function getMatchesList($db, $conn) {
                 <div class="stat-label">Today's Revenue</div>
                 <div class="stat-value gold" id="statTodayRevenue">...</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">Pending KYC</div>
+                <div class="stat-value orange" id="statPendingKyc">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Pending Withdrawals</div>
+                <div class="stat-value red" id="statPendingWithdrawals">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Open Disputes</div>
+                <div class="stat-value red" id="statOpenDisputes">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total TDS Deducted</div>
+                <div class="stat-value purple" id="statTotalTDS">...</div>
+            </div>
         </div>
         
         <!-- Tabs -->
@@ -1283,7 +1488,7 @@ function getMatchesList($db, $conn) {
             <button class="admin-tab active" data-tab="users">👥 Users</button>
             <button class="admin-tab" data-tab="matches">🎯 Matches</button>
             <button class="admin-tab" data-tab="transactions">💳 Transactions</button>
-            <button class="admin-tab" data-tab="settings">⚙️ Settings</button>
+            <button class="admin-tab" data-tab="analytics">📊 Analytics</button>
         </div>
         
         <!-- Tab: Users -->
@@ -1303,12 +1508,13 @@ function getMatchesList($db, $conn) {
                             <th>Matches</th>
                             <th>Wins</th>
                             <th>ELO</th>
+                            <th>KYC</th>
                             <th>Status</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="usersTableBody">
-                        <tr><td colspan="9" class="loading">Loading users...</td></tr>
+                        <tr><td colspan="10" class="loading">Loading users...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1343,6 +1549,7 @@ function getMatchesList($db, $conn) {
                             <th>Entry Fee</th>
                             <th>Prize Pool</th>
                             <th>Platform Fee</th>
+                            <th>TDS</th>
                             <th>Status</th>
                             <th>Players</th>
                             <th>Winner</th>
@@ -1350,7 +1557,7 @@ function getMatchesList($db, $conn) {
                         </tr>
                     </thead>
                     <tbody id="matchesTableBody">
-                        <tr><td colspan="9" class="loading">Loading matches...</td></tr>
+                        <tr><td colspan="10" class="loading">Loading matches...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1384,22 +1591,47 @@ function getMatchesList($db, $conn) {
             </div>
         </div>
         
-        <!-- Tab: Settings -->
-        <div class="tab-content" id="tab-settings">
-            <div style="background: #1a1a2e; padding: 24px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.04); max-width: 600px;">
-                <h2 style="font-size: 18px; margin-bottom: 16px;">⚙️ System Settings</h2>
-                
-                <div class="form-group">
-                    <label style="display: block; font-size: 13px; color: #94a3b8; margin-bottom: 4px;">Platform Fee (%)</label>
-                    <input type="number" id="platformFee" value="15" style="width: 100%; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(255,255,255,0.04); color: #f1f5f9; font-size: 14px; font-family: inherit;">
+        <!-- Tab: Analytics -->
+        <div class="tab-content" id="tab-analytics">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                <div class="stat-card">
+                    <div class="stat-label">Total User Balance</div>
+                    <div class="stat-value gold" id="analyticsTotalBalance">...</div>
                 </div>
-                
-                <div class="form-group">
-                    <label style="display: block; font-size: 13px; color: #94a3b8; margin-bottom: 4px;">Base URL</label>
-                    <input type="text" id="baseUrl" value="<?php echo BASE_URL; ?>" style="width: 100%; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(255,255,255,0.04); color: #f1f5f9; font-size: 14px; font-family: inherit;">
+                <div class="stat-card">
+                    <div class="stat-label">Total Earnings (All Users)</div>
+                    <div class="stat-value green" id="analyticsTotalEarnings">...</div>
                 </div>
-                
-                <button class="btn-action success" onclick="saveSettings()" style="padding: 10px 24px; font-size: 14px;">💾 Save Settings</button>
+                <div class="stat-card">
+                    <div class="stat-label">Total Withdrawn</div>
+                    <div class="stat-value red" id="analyticsTotalWithdrawn">...</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Platform Liability</div>
+                    <div class="stat-value orange" id="analyticsLiability">...</div>
+                </div>
+            </div>
+            
+            <div style="background: #1a1a2e; border-radius: 14px; padding: 20px; border: 1px solid rgba(255,255,255,0.04);">
+                <h3 style="margin-bottom: 12px;">📈 Financial History (Last 30 Days)</h3>
+                <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Deposits</th>
+                                <th>Withdrawals</th>
+                                <th>Platform Revenue</th>
+                                <th>Matches</th>
+                                <th>New Users</th>
+                                <th>TDS Deducted</th>
+                            </tr>
+                        </thead>
+                        <tbody id="analyticsTableBody">
+                            <tr><td colspan="7" class="loading">Loading analytics...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
         
@@ -1450,7 +1682,7 @@ function getMatchesList($db, $conn) {
     <div class="toast" id="adminToast"></div>
     
     <!-- ==============================================
-    ADMIN JAVASCRIPT
+    ADMIN JAVASCRIPT (ENHANCED)
     ============================================== -->
     <script>
         // ==============================================
@@ -1481,13 +1713,61 @@ function getMatchesList($db, $conn) {
                     if (tabId === 'users') loadUsers();
                     else if (tabId === 'matches') loadMatches();
                     else if (tabId === 'transactions') loadTransactions();
+                    else if (tabId === 'analytics') loadAnalytics();
                 });
             });
             
             // Initial load
             loadStats();
             loadUsers();
+            loadQuickStats();
         });
+        
+        // ==============================================
+        // LOAD QUICK STATS
+        // ==============================================
+        function loadQuickStats() {
+            // Load KYC count
+            fetch('?ajax=1&action=get_kyc_stats')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('quickKyc').textContent = data.data.pending || 0;
+                    }
+                })
+                .catch(() => {});
+            
+            // Load Withdrawal count
+            fetch('?ajax=1&action=get_withdrawal_stats')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('quickWithdrawals').textContent = data.data.pending || 0;
+                    }
+                })
+                .catch(() => {});
+            
+            // Load Dispute count
+            fetch('?ajax=1&action=get_dispute_stats')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('quickDisputes').textContent = data.data.open || 0;
+                    }
+                })
+                .catch(() => {});
+            
+            // Check maintenance mode
+            fetch('/api/admin_settings.php?action=get_maintenance_status')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('quickMaintenance').textContent = data.data.maintenance_mode ? '🔴 On' : '🟢 Off';
+                        document.getElementById('quickMaintenance').style.color = data.data.maintenance_mode ? '#ef4444' : '#10b981';
+                    }
+                })
+                .catch(() => {});
+        }
         
         // ==============================================
         // LOAD STATS
@@ -1506,6 +1786,10 @@ function getMatchesList($db, $conn) {
                         document.getElementById('statPlatformRevenue').textContent = '₹' + (s.total_platform_revenue || 0).toFixed(2);
                         document.getElementById('statNetProfit').textContent = '₹' + (s.net_platform_profit || 0).toFixed(2);
                         document.getElementById('statTodayRevenue').textContent = '₹' + (s.today_revenue || 0).toFixed(2);
+                        document.getElementById('statPendingKyc').textContent = s.pending_kyc || 0;
+                        document.getElementById('statPendingWithdrawals').textContent = s.pending_withdrawals || 0;
+                        document.getElementById('statOpenDisputes').textContent = s.open_disputes || 0;
+                        document.getElementById('statTotalTDS').textContent = '₹' + (s.total_tds || 0).toFixed(2);
                     }
                 })
                 .catch(() => {});
@@ -1518,7 +1802,7 @@ function getMatchesList($db, $conn) {
             const search = document.getElementById('userSearch').value;
             const offset = state.usersPage * state.usersLimit;
             
-            document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="9" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
+            document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="10" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
             
             fetch(`?ajax=1&action=get_users&offset=${offset}&limit=${state.usersLimit}&search=${encodeURIComponent(search)}`)
                 .then(res => res.json())
@@ -1529,18 +1813,18 @@ function getMatchesList($db, $conn) {
                         document.getElementById('userPaginationInfo').textContent = 
                             `Showing ${offset + 1} - ${Math.min(offset + state.usersLimit, state.usersTotal)} of ${state.usersTotal} users`;
                     } else {
-                        document.getElementById('usersTableBody').innerHTML = `<tr><td colspan="9" style="color: #ef4444;">${data.message}</td></tr>`;
+                        document.getElementById('usersTableBody').innerHTML = `<tr><td colspan="10" style="color: #ef4444;">${data.message}</td></tr>`;
                     }
                 })
                 .catch(() => {
-                    document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="9" style="color: #ef4444;">Failed to load users</td></tr>';
+                    document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="10" style="color: #ef4444;">Failed to load users</td></tr>';
                 });
         }
         
         function renderUsers(users) {
             const tbody = document.getElementById('usersTableBody');
             if (!users || users.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" style="color: #94a3b8; text-align: center;">No users found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" style="color: #94a3b8; text-align: center;">No users found</td></tr>';
                 return;
             }
             
@@ -1553,6 +1837,11 @@ function getMatchesList($db, $conn) {
                     <td>${u.total_matches_played || 0}</td>
                     <td>${u.total_matches_won || 0}</td>
                     <td>${u.elo_rating || 1200}</td>
+                    <td>
+                        <span class="status-badge ${u.kyc_status === 'verified' ? 'verified' : u.kyc_status === 'rejected' ? 'rejected' : 'pending'}">
+                            ${u.kyc_status || 'not_submitted'}
+                        </span>
+                    </td>
                     <td>
                         <span class="status-badge ${u.is_active ? 'active' : 'inactive'}">
                             ${u.is_active ? 'Active' : 'Inactive'}
@@ -1596,7 +1885,7 @@ function getMatchesList($db, $conn) {
         function loadMatches() {
             const status = document.getElementById('matchStatusFilter').value;
             
-            document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="9" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
+            document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="10" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
             
             fetch(`?ajax=1&action=get_matches&status=${encodeURIComponent(status)}`)
                 .then(res => res.json())
@@ -1604,18 +1893,18 @@ function getMatchesList($db, $conn) {
                     if (data.success) {
                         renderMatches(data.data.matches);
                     } else {
-                        document.getElementById('matchesTableBody').innerHTML = `<tr><td colspan="9" style="color: #ef4444;">${data.message}</td></tr>`;
+                        document.getElementById('matchesTableBody').innerHTML = `<tr><td colspan="10" style="color: #ef4444;">${data.message}</td></tr>`;
                     }
                 })
                 .catch(() => {
-                    document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="9" style="color: #ef4444;">Failed to load matches</td></tr>';
+                    document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="10" style="color: #ef4444;">Failed to load matches</td></tr>';
                 });
         }
         
         function renderMatches(matches) {
             const tbody = document.getElementById('matchesTableBody');
             if (!matches || matches.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" style="color: #94a3b8; text-align: center;">No matches found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" style="color: #94a3b8; text-align: center;">No matches found</td></tr>';
                 return;
             }
             
@@ -1626,6 +1915,7 @@ function getMatchesList($db, $conn) {
                     <td>₹${parseFloat(m.entry_fee).toFixed(2)}</td>
                     <td>₹${parseFloat(m.prize_pool).toFixed(2)}</td>
                     <td>₹${parseFloat(m.platform_fee).toFixed(2)}</td>
+                    <td>₹${parseFloat(m.tds_deducted || 0).toFixed(2)}</td>
                     <td><span class="status-badge ${m.status}">${m.status}</span></td>
                     <td>${escapeHtml(m.player1_name)} ${m.player2_name ? 'vs ' + escapeHtml(m.player2_name) : ''}</td>
                     <td>${m.winner_name ? escapeHtml(m.winner_name) + ' (₹' + parseFloat(m.winning_amount || 0).toFixed(2) + ')' : '-'}</td>
@@ -1675,6 +1965,50 @@ function getMatchesList($db, $conn) {
                     <td><span class="status-badge ${t.status}">${t.status}</span></td>
                     <td style="font-size: 11px; color: #94a3b8;">${escapeHtml(t.order_id)}</td>
                     <td style="font-size: 12px; color: #94a3b8;">${t.created_at ? new Date(t.created_at).toLocaleString() : '-'}</td>
+                </tr>
+            `).join('');
+        }
+        
+        // ==============================================
+        // LOAD ANALYTICS
+        // ==============================================
+        function loadAnalytics() {
+            fetch('?ajax=1&action=get_financial_metrics&days=30')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        const totals = data.data.totals;
+                        document.getElementById('analyticsTotalBalance').textContent = '₹' + (totals.total_user_balance || 0).toFixed(2);
+                        document.getElementById('analyticsTotalEarnings').textContent = '₹' + (totals.total_earnings || 0).toFixed(2);
+                        document.getElementById('analyticsTotalWithdrawn').textContent = '₹' + (totals.total_withdrawn || 0).toFixed(2);
+                        document.getElementById('analyticsLiability').textContent = '₹' + ((totals.total_user_balance || 0) - (totals.total_withdrawn || 0)).toFixed(2);
+                        
+                        renderAnalytics(data.data.history);
+                    } else {
+                        document.getElementById('analyticsTableBody').innerHTML = `<tr><td colspan="7" style="color: #ef4444;">${data.message}</td></tr>`;
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('analyticsTableBody').innerHTML = '<tr><td colspan="7" style="color: #ef4444;">Failed to load analytics</td></tr>';
+                });
+        }
+        
+        function renderAnalytics(history) {
+            const tbody = document.getElementById('analyticsTableBody');
+            if (!history || history.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="color: #94a3b8; text-align: center;">No analytics data available</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = history.map(h => `
+                <tr>
+                    <td>${h.metric_date}</td>
+                    <td style="color: #10b981;">₹${parseFloat(h.daily_deposits || 0).toFixed(2)}</td>
+                    <td style="color: #ef4444;">₹${parseFloat(h.daily_withdrawals || 0).toFixed(2)}</td>
+                    <td style="color: #fbbf24;">₹${parseFloat(h.daily_platform_revenue || 0).toFixed(2)}</td>
+                    <td>${h.daily_matches_played || 0}</td>
+                    <td>${h.daily_new_users || 0}</td>
+                    <td style="color: #8b5cf6;">₹${parseFloat(h.total_tds_deducted || 0).toFixed(2)}</td>
                 </tr>
             `).join('');
         }
@@ -1760,17 +2094,6 @@ function getMatchesList($db, $conn) {
         }
         
         // ==============================================
-        // SAVE SETTINGS
-        // ==============================================
-        function saveSettings() {
-            const platformFee = document.getElementById('platformFee').value;
-            const baseUrl = document.getElementById('baseUrl').value;
-            
-            // In production, this would save to database or config file
-            showToast('Settings saved successfully (Demo)', 'success');
-        }
-        
-        // ==============================================
         // TOAST NOTIFICATIONS
         // ==============================================
         function showToast(message, type = 'info') {
@@ -1816,8 +2139,25 @@ function getMatchesList($db, $conn) {
                 e.preventDefault();
                 loadStats();
                 loadUsers();
+                loadQuickStats();
             }
         });
+        
+        // ==============================================
+        // AUTO-REFRESH (Every 60 seconds)
+        // ==============================================
+        setInterval(function() {
+            const activeTab = document.querySelector('.admin-tab.active');
+            if (activeTab) {
+                const tabId = activeTab.dataset.tab;
+                if (tabId === 'users') loadUsers();
+                else if (tabId === 'matches') loadMatches();
+                else if (tabId === 'transactions') loadTransactions();
+                else if (tabId === 'analytics') loadAnalytics();
+            }
+            loadStats();
+            loadQuickStats();
+        }, 60000);
     </script>
     
     <?php endif; ?>
