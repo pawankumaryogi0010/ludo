@@ -1,7 +1,7 @@
 <?php
 /**
  * ======================================================
- * ADMIN_KYC.PHP - KYC Management API Handler
+ * ADMIN_KYC.PHP - KYC Management API
  * Ludo Tournament Platform - KYC Verification System
  * Version: 2.0.0
  * ======================================================
@@ -12,34 +12,27 @@ if (!defined('BASE_PATH')) {
     define('BASE_PATH', dirname(__DIR__));
 }
 
-// Include configuration
 require_once dirname(__DIR__) . '/config/db.php';
 
-// Set headers for JSON response
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 
-// ==============================================
-// CORS Headers
-// ==============================================
 header('Access-Control-Allow-Origin: ' . BASE_URL);
 header('Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, X-CSRF-Token');
 header('Access-Control-Allow-Credentials: true');
 
-// Handle preflight
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit;
 }
 
+session_start();
+
 // ==============================================
 // AUTHENTICATION & AUTHORIZATION
 // ==============================================
-session_start();
-
-// Check if admin is logged in
 if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
     jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
 }
@@ -48,23 +41,26 @@ try {
     $db = Database::getInstance();
     $conn = $db->getConnection();
     
-    // Verify admin status
     $stmt = $conn->prepare("
-        SELECT id, username, is_admin, is_active 
-        FROM users 
-        WHERE id = :admin_id 
-        AND is_admin = 1 
-        AND is_active = 1
+        SELECT u.id, u.username, u.is_admin, u.is_active 
+        FROM users u
+        JOIN sessions s ON u.id = s.user_id
+        WHERE u.id = :admin_id 
+        AND u.is_admin = 1 
+        AND u.is_active = 1
+        AND s.session_token = :token
+        AND s.is_active = 1
+        AND s.expires_at > NOW()
     ");
-    $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
+    $stmt->execute([
+        ':admin_id' => $_SESSION['admin_id'],
+        ':token' => $_SESSION['admin_token']
+    ]);
     $admin = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$admin) {
-        jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
-    }
-    
-    if ($_SESSION['admin_token'] !== hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-        jsonResponse(false, 'Invalid session - Please login again', [], 401);
+        http_response_code(401);
+        jsonResponse(false, 'Unauthorized - Invalid admin session', [], 401);
     }
     
 } catch (Exception $e) {
@@ -74,23 +70,23 @@ try {
 // ==============================================
 // ROUTING
 // ==============================================
-$action = $_GET['action'] ?? $_POST['action'] ?? '';
+$action = isset($_GET['action']) ? $_GET['action'] : '';
 
 switch ($action) {
     case 'list':
-        handleKycList();
+        handleList();
         break;
     case 'get':
-        handleKycGet();
+        handleGet();
         break;
     case 'verify':
-        handleKycVerify();
+        handleVerify();
         break;
     case 'reject':
-        handleKycReject();
+        handleReject();
         break;
     case 'get_stats':
-        handleKycStats();
+        handleStats();
         break;
     default:
         jsonResponse(false, 'Invalid action specified', [], 400);
@@ -98,14 +94,15 @@ switch ($action) {
 }
 
 // ==============================================
-// HANDLER: List KYC Requests
+// HANDLER: List KYC Documents
 // ==============================================
-function handleKycList() {
+function handleList() {
     global $db, $conn;
     
     $status = isset($_GET['status']) ? $_GET['status'] : '';
     $limit = intval($_GET['limit'] ?? 50);
     $offset = intval($_GET['offset'] ?? 0);
+    $search = isset($_GET['search']) ? '%' . $_GET['search'] . '%' : '';
     
     try {
         $where = "1=1";
@@ -116,8 +113,13 @@ function handleKycList() {
             $params[':status'] = $status;
         }
         
+        if (!empty($search)) {
+            $where .= " AND (u.username LIKE :search OR u.mobile LIKE :search OR u.email LIKE :search OR k.document_number LIKE :search)";
+            $params[':search'] = $search;
+        }
+        
         // Get total count
-        $stmt = $conn->prepare("SELECT COUNT(*) as total FROM kyc_documents k WHERE {$where}");
+        $stmt = $conn->prepare("SELECT COUNT(*) as total FROM kyc_documents k LEFT JOIN users u ON k.user_id = u.id WHERE {$where}");
         $stmt->execute($params);
         $total = intval($stmt->fetchColumn());
         
@@ -148,11 +150,17 @@ function handleKycList() {
                 u.kyc_status as user_kyc_status,
                 u.is_verified,
                 u.wallet_balance,
-                u.total_earnings
+                u.total_earnings,
+                u.total_matches_played
             FROM kyc_documents k
             LEFT JOIN users u ON k.user_id = u.id
             WHERE {$where}
-            ORDER BY k.created_at DESC
+            ORDER BY 
+                CASE k.status 
+                    WHEN 'pending' THEN 1 
+                    ELSE 2 
+                END,
+                k.created_at DESC
             LIMIT :limit OFFSET :offset
         ");
         
@@ -176,7 +184,7 @@ function handleKycList() {
 // ==============================================
 // HANDLER: Get Single KYC Document
 // ==============================================
-function handleKycGet() {
+function handleGet() {
     global $db, $conn;
     
     $id = intval($_GET['id'] ?? 0);
@@ -220,7 +228,7 @@ function handleKycGet() {
 // ==============================================
 // HANDLER: Verify KYC
 // ==============================================
-function handleKycVerify() {
+function handleVerify() {
     global $db, $conn;
     
     $input = json_decode(file_get_contents('php://input'), true);
@@ -231,7 +239,6 @@ function handleKycVerify() {
     $id = intval($input['id']);
     $notes = $input['notes'] ?? '';
     
-    // Validate CSRF token
     $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
     if (!CSRFToken::validate($csrfToken)) {
         jsonResponse(false, 'Invalid CSRF token', [], 403);
@@ -353,7 +360,7 @@ function handleKycVerify() {
 // ==============================================
 // HANDLER: Reject KYC
 // ==============================================
-function handleKycReject() {
+function handleReject() {
     global $db, $conn;
     
     $input = json_decode(file_get_contents('php://input'), true);
@@ -364,7 +371,6 @@ function handleKycReject() {
     $id = intval($input['id']);
     $reason = $input['reason'] ?? 'Document verification failed';
     
-    // Validate CSRF token
     $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
     if (!CSRFToken::validate($csrfToken)) {
         jsonResponse(false, 'Invalid CSRF token', [], 403);
@@ -468,33 +474,31 @@ function handleKycReject() {
 // ==============================================
 // HANDLER: KYC Statistics
 // ==============================================
-function handleKycStats() {
+function handleStats() {
     global $db, $conn;
     
     try {
         $stats = [];
         
-        // Total pending KYC
         $stmt = $conn->query("SELECT COUNT(*) as pending FROM kyc_documents WHERE status = 'pending'");
         $stats['pending'] = intval($stmt->fetchColumn());
         
-        // Total verified KYC
         $stmt = $conn->query("SELECT COUNT(*) as verified FROM kyc_documents WHERE status = 'verified'");
         $stats['verified'] = intval($stmt->fetchColumn());
         
-        // Total rejected KYC
         $stmt = $conn->query("SELECT COUNT(*) as rejected FROM kyc_documents WHERE status = 'rejected'");
         $stats['rejected'] = intval($stmt->fetchColumn());
         
-        // Total users with KYC submitted
+        $stmt = $conn->query("SELECT COUNT(*) as total FROM kyc_documents");
+        $stats['total'] = intval($stmt->fetchColumn());
+        
         $stmt = $conn->query("
-            SELECT COUNT(DISTINCT user_id) as total 
+            SELECT COUNT(DISTINCT user_id) as total_submitted 
             FROM kyc_documents 
             WHERE status IN ('pending', 'verified', 'rejected')
         ");
         $stats['total_submitted'] = intval($stmt->fetchColumn());
         
-        // Total users without KYC
         $stmt = $conn->query("
             SELECT COUNT(*) as no_kyc 
             FROM users 
@@ -503,7 +507,6 @@ function handleKycStats() {
         ");
         $stats['no_kyc'] = intval($stmt->fetchColumn());
         
-        // Today's submissions
         $stmt = $conn->query("
             SELECT COUNT(*) as today 
             FROM kyc_documents 
