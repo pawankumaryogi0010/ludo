@@ -3,7 +3,7 @@
  * ======================================================
  * ADMIN DISPUTES.PHP - Dispute Management UI
  * Ludo Tournament Platform - Admin Dispute Dashboard
- * Version: 2.0.0
+ * Version: 2.1.0 - SECURE & ENHANCED
  * ======================================================
  */
 
@@ -16,7 +16,45 @@ require_once dirname(__DIR__) . '/config/db.php';
 
 SessionManager::init();
 
-$isAdminLoggedIn = false;
+// ==============================================
+// SECURE SESSION VALIDATION FUNCTION
+// ==============================================
+function validateAdminSession() {
+    if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
+        return false;
+    }
+    
+    try {
+        $db = Database::getInstance();
+        $conn = $db->getConnection();
+        
+        $stmt = $conn->prepare("
+            SELECT id 
+            FROM sessions 
+            WHERE user_id = :admin_id 
+            AND session_token = :token 
+            AND is_active = 1 
+            AND expires_at > NOW()
+        ");
+        $stmt->execute([
+            ':admin_id' => $_SESSION['admin_id'],
+            ':token' => $_SESSION['admin_token']
+        ]);
+        
+        return $stmt->fetch() !== false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+// Validate session - redirect if invalid
+if (!validateAdminSession()) {
+    session_destroy();
+    header('Location: index.php');
+    exit;
+}
+
+$isAdminLoggedIn = true;
 
 if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
     try {
@@ -33,7 +71,7 @@ if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
         $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
         $admin = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        if ($admin && $_SESSION['admin_token'] === hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
+        if ($admin) {
             $isAdminLoggedIn = true;
         }
     } catch (Exception $e) {
@@ -541,7 +579,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             line-height: 1.5;
         }
         
-        .message-item .msg-body .screenshot {
+        .message-item .msg-body .screenshot-link {
             display: inline-block;
             margin-top: 6px;
             padding: 4px 12px;
@@ -550,6 +588,40 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             font-size: 12px;
             color: #3b82f6;
             text-decoration: none;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .message-item .msg-body .screenshot-link:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+        
+        /* Image Zoom Modal */
+        .zoom-modal .modal-box {
+            max-width: 90vw;
+            max-height: 90vh;
+            background: rgba(0, 0, 0, 0.9);
+            border: none;
+            box-shadow: none;
+            padding: 20px;
+        }
+        
+        .zoom-modal .modal-box img {
+            max-width: 100%;
+            max-height: 80vh;
+            border-radius: 8px;
+            display: block;
+            margin: 0 auto;
+        }
+        
+        .zoom-modal .modal-actions {
+            justify-content: center;
+            margin-top: 16px;
+        }
+        
+        .zoom-modal .modal-actions button {
+            flex: none;
+            padding: 10px 30px;
         }
         
         /* Toast */
@@ -614,6 +686,48 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             margin-bottom: 8px;
         }
         
+        /* Pagination Dropdown */
+        .pagination-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        
+        .pagination-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        
+        .pagination-left select {
+            padding: 6px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 13px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        
+        .pagination-left select:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .pagination-left select option {
+            background: #1a1a2e;
+        }
+        
+        .pagination-right {
+            display: flex;
+            gap: 8px;
+        }
+        
         @media (max-width: 768px) {
             .ticket-card .ticket-details {
                 grid-template-columns: 1fr;
@@ -621,6 +735,11 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             
             .stats-bar {
                 grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .pagination-controls {
+                flex-direction: column;
+                align-items: flex-start;
             }
         }
         
@@ -641,6 +760,8 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
                 <span>👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
                 <a href="index.php">← Back to Dashboard</a>
                 <a href="settings.php">⚙️ Settings</a>
+                <a href="kyc.php">🛡️ KYC</a>
+                <a href="withdrawals.php">🏦 Withdrawals</a>
                 <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
         </div>
@@ -699,10 +820,17 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             </div>
         </div>
         
-        <!-- Pagination -->
-        <div style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span id="paginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
-            <div style="display: flex; gap: 8px;">
+        <!-- Updated Pagination with Records Per Page Dropdown -->
+        <div class="pagination-controls">
+            <div class="pagination-left">
+                <span id="paginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
+                <select id="ticketLimit" onchange="state.limit = parseInt(this.value); state.currentPage = 0; loadTickets();">
+                    <option value="20">20 per page</option>
+                    <option value="50" selected>50 per page</option>
+                    <option value="100">100 per page</option>
+                </select>
+            </div>
+            <div class="pagination-right">
                 <button class="btn-action view" onclick="prevPage()" id="prevBtn">← Prev</button>
                 <button class="btn-action view" onclick="nextPage()" id="nextBtn">Next →</button>
             </div>
@@ -769,12 +897,24 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
     </div>
     
     <!-- ==============================================
+    MODAL: Image Zoom
+    ============================================== -->
+    <div class="modal-overlay zoom-modal" id="imageZoomModal">
+        <div class="modal-box">
+            <div style="text-align: right; margin-bottom: 12px;">
+                <button onclick="closeModal('imageZoomModal')" style="background: rgba(255,255,255,0.1); color: white; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px;">✕ Close</button>
+            </div>
+            <img id="zoomImage" src="" alt="Zoomed Image">
+        </div>
+    </div>
+    
+    <!-- ==============================================
     TOAST NOTIFICATION
     ============================================== -->
     <div class="toast" id="adminToast"></div>
     
     <!-- ==============================================
-    JAVASCRIPT
+    JAVASCRIPT - UPDATED WITH 401 HANDLER, PAGINATION & IMAGE ZOOM
     ============================================== -->
     <script>
         // ==============================================
@@ -782,13 +922,36 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         // ==============================================
         let state = {
             currentPage: 0,
-            limit: 20,
+            limit: 50, // Changed from 20 to 50
             total: 0,
             status: '<?php echo $statusFilter; ?>',
             priority: '',
             csrfToken: '<?php echo $csrf_token; ?>',
             currentTicketId: null
         };
+        
+        // ==============================================
+        // SESSION HANDLER - Check for 401 redirect
+        // ==============================================
+        function handleApiResponse(response) {
+            if (response.status === 401) {
+                // Session expired - redirect to login
+                showToast('Session expired. Redirecting to login...', 'error');
+                setTimeout(() => {
+                    window.location.href = 'index.php';
+                }, 1500);
+                throw new Error('Session expired');
+            }
+            return response.json();
+        }
+        
+        // ==============================================
+        // IMAGE ZOOM FUNCTION
+        // ==============================================
+        function zoomImage(src) {
+            document.getElementById('zoomImage').src = src;
+            document.getElementById('imageZoomModal').classList.add('active');
+        }
         
         // ==============================================
         // DOM READY
@@ -829,7 +992,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         // ==============================================
         function loadStats() {
             fetch('/api/admin_disputes.php?action=get_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('statOpen').textContent = data.data.open || 0;
@@ -844,7 +1007,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // LOAD TICKETS
+        // LOAD TICKETS - UPDATED WITH state.limit
         // ==============================================
         function loadTickets() {
             const listEl = document.getElementById('ticketList');
@@ -859,7 +1022,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             }
             
             fetch(url)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         state.total = data.data.total;
@@ -947,7 +1110,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // PAGINATION
+        // PAGINATION - UPDATED WITH state.limit
         // ==============================================
         function updatePagination() {
             const totalPages = Math.ceil(state.total / state.limit);
@@ -976,7 +1139,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // VIEW TICKET
+        // VIEW TICKET - UPDATED WITH 401 HANDLER
         // ==============================================
         function viewTicket(id) {
             state.currentTicketId = id;
@@ -987,7 +1150,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             
             // Load ticket details
             fetch(`/api/admin_disputes.php?action=get&id=${id}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         renderViewDetails(data.data);
@@ -1035,9 +1198,12 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
             `;
         }
         
+        // ==============================================
+        // LOAD MESSAGES - UPDATED WITH 401 HANDLER & IMAGE ZOOM
+        // ==============================================
         function loadMessages(ticketId) {
             fetch(`/api/admin_disputes.php?action=get_messages&ticket_id=${ticketId}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     const thread = document.getElementById('messageThread');
                     if (!thread) return;
@@ -1051,7 +1217,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
                                 </div>
                                 <div class="msg-body">
                                     ${escapeHtml(m.message)}
-                                    ${m.screenshot_url ? `<br><a href="${escapeHtml(m.screenshot_url)}" target="_blank" class="screenshot">📎 View Screenshot</a>` : ''}
+                                    ${m.screenshot_url ? `<br><span onclick="zoomImage('${escapeHtml(m.screenshot_url)}')" class="screenshot-link">📎 View Screenshot (Click to Zoom)</span>` : ''}
                                 </div>
                             </div>
                         `).join('');
@@ -1068,7 +1234,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // SEND REPLY
+        // SEND REPLY - UPDATED WITH 401 HANDLER
         // ==============================================
         function sendReply() {
             const message = document.getElementById('replyMessage').value.trim();
@@ -1098,7 +1264,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Reply sent successfully', 'success');
@@ -1119,7 +1285,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // INVESTIGATE TICKET
+        // INVESTIGATE TICKET - UPDATED WITH 401 HANDLER
         // ==============================================
         function investigateTicket(id) {
             if (!confirm('Mark this ticket as under investigation?')) return;
@@ -1142,7 +1308,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Ticket is now under investigation', 'success');
@@ -1164,7 +1330,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // RESOLVE TICKET
+        // RESOLVE TICKET - UPDATED WITH 401 HANDLER
         // ==============================================
         function openResolveModal(id) {
             document.getElementById('resolveTicketId').value = id;
@@ -1221,7 +1387,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
                 },
                 body: JSON.stringify(payload)
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Ticket resolved successfully', 'success');
@@ -1242,7 +1408,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
         }
         
         // ==============================================
-        // CLOSE TICKET
+        // CLOSE TICKET - UPDATED WITH 401 HANDLER
         // ==============================================
         function closeTicket(id) {
             if (!confirm('Close this resolved ticket?')) return;
@@ -1265,7 +1431,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'open';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Ticket closed successfully', 'success');
