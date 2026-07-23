@@ -3,7 +3,7 @@
  * ======================================================
  * ADMIN_WITHDRAWALS.PHP - Withdrawal Management API
  * Ludo Tournament Platform - Admin Withdrawal System
- * Version: 2.0.0
+ * Version: 2.0.0 - COMPLETE
  * ======================================================
  */
 
@@ -47,22 +47,27 @@ try {
     $db = Database::getInstance();
     $conn = $db->getConnection();
     
+    // Verify admin with database session token
     $stmt = $conn->prepare("
-        SELECT id, username, is_admin, is_active 
-        FROM users 
-        WHERE id = :admin_id 
-        AND is_admin = 1 
-        AND is_active = 1
+        SELECT u.id, u.username, u.is_admin, u.is_active 
+        FROM users u
+        JOIN sessions s ON u.id = s.user_id
+        WHERE u.id = :admin_id 
+        AND u.is_admin = 1 
+        AND u.is_active = 1
+        AND s.session_token = :token
+        AND s.is_active = 1
+        AND s.expires_at > NOW()
     ");
-    $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
+    $stmt->execute([
+        ':admin_id' => $_SESSION['admin_id'],
+        ':token' => $_SESSION['admin_token']
+    ]);
     $admin = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$admin) {
-        jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
-    }
-    
-    if ($_SESSION['admin_token'] !== hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-        jsonResponse(false, 'Invalid session - Please login again', [], 401);
+        http_response_code(401);
+        jsonResponse(false, 'Unauthorized - Invalid admin session', [], 401);
     }
     
 } catch (Exception $e) {
@@ -160,7 +165,9 @@ function handleList() {
                 u.wallet_balance,
                 u.kyc_status,
                 u.is_active,
-                u.total_earnings
+                u.total_earnings,
+                u.total_withdrawn,
+                u.pan_number
             FROM withdrawals w
             LEFT JOIN users u ON w.user_id = u.id
             WHERE {$where}
@@ -217,7 +224,6 @@ function handleGet() {
                 u.total_withdrawn,
                 u.pan_number,
                 u.aadhaar_number,
-                u.kyc_status as user_kyc_status,
                 admin.username as processed_by_name
             FROM withdrawals w
             LEFT JOIN users u ON w.user_id = u.id
@@ -282,7 +288,7 @@ function handleApprove() {
         
         // Check user balance
         $stmt = $conn->prepare("
-            SELECT id, wallet_balance, is_active 
+            SELECT id, wallet_balance, is_active, kyc_status
             FROM users 
             WHERE id = :user_id 
             FOR UPDATE
@@ -300,21 +306,10 @@ function handleApprove() {
             jsonResponse(false, 'Insufficient balance in user wallet', [], 400);
         }
         
-        // Check if KYC is required and verified
-        $settings = getSystemSettings($conn);
-        if ($settings['kyc_required_for_withdrawal'] ?? true) {
-            $stmt = $conn->prepare("
-                SELECT kyc_status 
-                FROM users 
-                WHERE id = :user_id
-            ");
-            $stmt->execute([':user_id' => $withdrawal['user_id']]);
-            $kycStatus = $stmt->fetchColumn();
-            
-            if ($kycStatus !== 'verified') {
-                $db->rollback();
-                jsonResponse(false, 'User KYC is not verified. Withdrawal requires verified KYC.', [], 400);
-            }
+        // Check KYC
+        if ($user['kyc_status'] !== 'verified') {
+            $db->rollback();
+            jsonResponse(false, 'User KYC is not verified. Withdrawal requires verified KYC.', [], 400);
         }
         
         // Generate transaction ID
@@ -397,26 +392,6 @@ function handleApprove() {
             ])
         ]);
         
-        // Log action
-        $logEntry = [
-            'action' => 'withdrawal_approved',
-            'admin_id' => $_SESSION['admin_id'],
-            'withdrawal_id' => $id,
-            'user_id' => $withdrawal['user_id'],
-            'amount' => $withdrawal['amount']
-        ];
-        
-        $stmt = $conn->prepare("
-            INSERT INTO maintenance_logs (action, details, admin_id, ip_address, created_at)
-            VALUES (:action, :details, :admin_id, :ip, CURRENT_TIMESTAMP)
-        ");
-        $stmt->execute([
-            ':action' => 'withdrawal_approved',
-            ':details' => json_encode($logEntry),
-            ':admin_id' => $_SESSION['admin_id'],
-            ':ip' => $_SERVER['REMOTE_ADDR'] ?? 'unknown'
-        ]);
-        
         $db->commit();
         
         jsonResponse(true, 'Withdrawal approved successfully', [
@@ -438,7 +413,150 @@ function handleApprove() {
 }
 
 // ==============================================
-// HANDLER: Process Withdrawal (Mark as Processing)
+// HANDLER: Reject Withdrawal
+// ==============================================
+function handleReject() {
+    global $db, $conn;
+    
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input || !isset($input['id'])) {
+        jsonResponse(false, 'Missing withdrawal ID', [], 400);
+    }
+    
+    $id = intval($input['id']);
+    $reason = $input['reason'] ?? 'Withdrawal rejected by admin';
+    
+    $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+    if (!CSRFToken::validate($csrfToken)) {
+        jsonResponse(false, 'Invalid CSRF token', [], 403);
+    }
+    
+    if (empty($reason) || strlen($reason) < 10) {
+        jsonResponse(false, 'Please provide a detailed rejection reason (minimum 10 characters)', [], 400);
+    }
+    
+    try {
+        $db->beginTransaction();
+        
+        // Get withdrawal with lock
+        $stmt = $conn->prepare("
+            SELECT user_id, amount, status 
+            FROM withdrawals 
+            WHERE id = :id 
+            FOR UPDATE
+        ");
+        $stmt->execute([':id' => $id]);
+        $withdrawal = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$withdrawal) {
+            $db->rollback();
+            jsonResponse(false, 'Withdrawal not found', [], 404);
+        }
+        
+        if ($withdrawal['status'] !== 'pending') {
+            $db->rollback();
+            jsonResponse(false, 'Only pending withdrawals can be rejected', [], 400);
+        }
+        
+        // Get current user balance
+        $stmt = $conn->prepare("
+            SELECT wallet_balance 
+            FROM users 
+            WHERE id = :user_id 
+            FOR UPDATE
+        ");
+        $stmt->execute([':user_id' => $withdrawal['user_id']]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        // Refund amount to user wallet
+        $stmt = $conn->prepare("
+            UPDATE users 
+            SET wallet_balance = wallet_balance + :amount, updated_at = CURRENT_TIMESTAMP 
+            WHERE id = :user_id
+        ");
+        $stmt->execute([
+            ':amount' => $withdrawal['amount'],
+            ':user_id' => $withdrawal['user_id']
+        ]);
+        
+        // Update withdrawal status
+        $stmt = $conn->prepare("
+            UPDATE withdrawals 
+            SET 
+                status = 'rejected',
+                processed_by = :admin_id,
+                processed_at = CURRENT_TIMESTAMP,
+                rejection_reason = :reason,
+                admin_notes = CONCAT(COALESCE(admin_notes, ''), '\nRejected: ', :reason),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :id
+        ");
+        $stmt->execute([
+            ':admin_id' => $_SESSION['admin_id'],
+            ':reason' => $reason,
+            ':id' => $id
+        ]);
+        
+        // Record refund transaction
+        $orderId = 'REFUND-WD-' . strtoupper(uniqid());
+        $stmt = $conn->prepare("
+            INSERT INTO transactions (
+                user_id,
+                amount,
+                type,
+                source,
+                description,
+                order_id,
+                status,
+                balance_before,
+                balance_after,
+                metadata,
+                created_at
+            ) VALUES (
+                :user_id,
+                :amount,
+                'credit',
+                'refund',
+                :description,
+                :order_id,
+                'success',
+                :balance_before,
+                :balance_after,
+                :metadata,
+                CURRENT_TIMESTAMP
+            )
+        ");
+        
+        $stmt->execute([
+            ':user_id' => $withdrawal['user_id'],
+            ':amount' => $withdrawal['amount'],
+            ':description' => "Refund for rejected withdrawal #{$id}",
+            ':order_id' => $orderId,
+            ':balance_before' => $user['wallet_balance'],
+            ':balance_after' => $user['wallet_balance'] + $withdrawal['amount'],
+            ':metadata' => json_encode([
+                'withdrawal_id' => $id,
+                'rejection_reason' => $reason
+            ])
+        ]);
+        
+        $db->commit();
+        
+        jsonResponse(true, 'Withdrawal rejected and amount refunded', [
+            'withdrawal_id' => $id,
+            'refunded_amount' => $withdrawal['amount']
+        ]);
+        
+    } catch (PDOException $e) {
+        if ($db->inTransaction()) {
+            $db->rollback();
+        }
+        jsonResponse(false, 'Database error: ' . $e->getMessage(), [], 500);
+    }
+}
+
+// ==============================================
+// HANDLER: Process Withdrawal
 // ==============================================
 function handleProcess() {
     global $db, $conn;
@@ -460,7 +578,7 @@ function handleProcess() {
         $db->beginTransaction();
         
         $stmt = $conn->prepare("
-            SELECT user_id, amount, status 
+            SELECT status 
             FROM withdrawals 
             WHERE id = :id 
             FOR UPDATE
@@ -590,143 +708,6 @@ function handleComplete() {
 }
 
 // ==============================================
-// HANDLER: Reject Withdrawal
-// ==============================================
-function handleReject() {
-    global $db, $conn;
-    
-    $input = json_decode(file_get_contents('php://input'), true);
-    if (!$input || !isset($input['id'])) {
-        jsonResponse(false, 'Missing withdrawal ID', [], 400);
-    }
-    
-    $id = intval($input['id']);
-    $reason = $input['reason'] ?? 'Withdrawal rejected by admin';
-    
-    $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
-    if (!CSRFToken::validate($csrfToken)) {
-        jsonResponse(false, 'Invalid CSRF token', [], 403);
-    }
-    
-    if (empty($reason) || strlen($reason) < 10) {
-        jsonResponse(false, 'Please provide a detailed rejection reason (minimum 10 characters)', [], 400);
-    }
-    
-    try {
-        $db->beginTransaction();
-        
-        $stmt = $conn->prepare("
-            SELECT user_id, amount, status 
-            FROM withdrawals 
-            WHERE id = :id 
-            FOR UPDATE
-        ");
-        $stmt->execute([':id' => $id]);
-        $withdrawal = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if (!$withdrawal) {
-            $db->rollback();
-            jsonResponse(false, 'Withdrawal not found', [], 404);
-        }
-        
-        if ($withdrawal['status'] !== 'pending') {
-            $db->rollback();
-            jsonResponse(false, 'Only pending withdrawals can be rejected', [], 400);
-        }
-        
-        // Refund amount to user wallet
-        $stmt = $conn->prepare("
-            UPDATE users 
-            SET wallet_balance = wallet_balance + :amount, updated_at = CURRENT_TIMESTAMP 
-            WHERE id = :user_id
-        ");
-        $stmt->execute([
-            ':amount' => $withdrawal['amount'],
-            ':user_id' => $withdrawal['user_id']
-        ]);
-        
-        // Update withdrawal status
-        $stmt = $conn->prepare("
-            UPDATE withdrawals 
-            SET 
-                status = 'rejected',
-                processed_by = :admin_id,
-                processed_at = CURRENT_TIMESTAMP,
-                rejection_reason = :reason,
-                admin_notes = CONCAT(COALESCE(admin_notes, ''), '\nRejected: ', :reason),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = :id
-        ");
-        $stmt->execute([
-            ':admin_id' => $_SESSION['admin_id'],
-            ':reason' => $reason,
-            ':id' => $id
-        ]);
-        
-        // Record refund transaction
-        $orderId = 'REFUND-WD-' . strtoupper(uniqid());
-        $stmt = $conn->prepare("
-            INSERT INTO transactions (
-                user_id,
-                amount,
-                type,
-                source,
-                description,
-                order_id,
-                status,
-                balance_before,
-                balance_after,
-                metadata,
-                created_at
-            ) VALUES (
-                :user_id,
-                :amount,
-                'credit',
-                'refund',
-                :description,
-                :order_id,
-                'success',
-                :balance_before,
-                :balance_after,
-                :metadata,
-                CURRENT_TIMESTAMP
-            )
-        ");
-        
-        // Get current balance
-        $stmt2 = $conn->prepare("SELECT wallet_balance FROM users WHERE id = :user_id");
-        $stmt2->execute([':user_id' => $withdrawal['user_id']]);
-        $currentBalance = floatval($stmt2->fetchColumn());
-        
-        $stmt->execute([
-            ':user_id' => $withdrawal['user_id'],
-            ':amount' => $withdrawal['amount'],
-            ':description' => "Refund for rejected withdrawal #{$id}",
-            ':order_id' => $orderId,
-            ':balance_before' => $currentBalance - $withdrawal['amount'],
-            ':balance_after' => $currentBalance,
-            ':metadata' => json_encode([
-                'withdrawal_id' => $id,
-                'rejection_reason' => $reason
-            ])
-        ]);
-        
-        $db->commit();
-        
-        jsonResponse(true, 'Withdrawal rejected and amount refunded', [
-            'withdrawal_id' => $id,
-            'refunded_amount' => $withdrawal['amount']
-        ]);
-        
-    } catch (PDOException $e) {
-        if ($db->inTransaction()) {
-            $db->rollback();
-        }
-        jsonResponse(false, 'Database error: ' . $e->getMessage(), [], 500);
-    }
-}
-
-// ==============================================
 // HANDLER: Withdrawal Statistics
 // ==============================================
 function handleStats() {
@@ -826,20 +807,5 @@ function handleUserWithdrawals() {
     } catch (PDOException $e) {
         jsonResponse(false, 'Database error: ' . $e->getMessage(), [], 500);
     }
-}
-
-// ==============================================
-// HELPER: Get System Settings
-// ==============================================
-function getSystemSettings($conn) {
-    $settings = [];
-    $stmt = $conn->query("SELECT setting_key, setting_value FROM system_settings");
-    $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    foreach ($results as $row) {
-        $settings[$row['setting_key']] = $row['setting_value'];
-    }
-    
-    return $settings;
 }
 ?>
