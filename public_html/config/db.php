@@ -1,9 +1,9 @@
 <?php
 /**
  * ======================================================
- * DATABASE CONFIGURATION & PDO CONNECTION WRAPPER
+ * DATABASE CONFIGURATION & CORE SECURITY
  * Ludo Tournament Platform - Production Ready
- * Version: 1.0.0
+ * Version: 3.0.0 - SECURE & COMPLETE
  * ======================================================
  */
 
@@ -475,6 +475,38 @@ class SessionManager {
     public static function regenerate(): bool {
         return session_regenerate_id(true);
     }
+    
+    /**
+     * Validate admin session with database token
+     * @return bool
+     */
+    public static function validateAdminSession(): bool {
+        if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
+            return false;
+        }
+        
+        try {
+            $db = Database::getInstance();
+            $conn = $db->getConnection();
+            
+            $stmt = $conn->prepare("
+                SELECT id 
+                FROM sessions 
+                WHERE user_id = :admin_id 
+                AND session_token = :token 
+                AND is_active = 1 
+                AND expires_at > NOW()
+            ");
+            $stmt->execute([
+                ':admin_id' => $_SESSION['admin_id'],
+                ':token' => $_SESSION['admin_token']
+            ]);
+            
+            return $stmt->fetch() !== false;
+        } catch (Exception $e) {
+            return false;
+        }
+    }
 }
 
 // ======================================================
@@ -640,6 +672,14 @@ function getCurrentUserId(): ?int {
     return SessionManager::get('user_id');
 }
 
+/**
+ * Validate admin session (alias for SessionManager::validateAdminSession)
+ * @return bool
+ */
+function validateAdminSession(): bool {
+    return SessionManager::validateAdminSession();
+}
+
 // ======================================================
 // INITIALIZE SESSION ON INCLUDE
 // ======================================================
@@ -654,3 +694,4 @@ SessionManager::init();
 // ======================================================
 // END OF CONFIGURATION FILE
 // ======================================================
+?>
