@@ -1,9 +1,9 @@
 <?php
 /**
  * ======================================================
- * ADMIN INDEX.PHP - Pro Command Center (FULLY INTEGRATED)
+ * ADMIN INDEX.PHP - Pro Command Center (SECURE VERSION)
  * Ludo Tournament Platform - Admin Dashboard
- * Version: 2.0.0
+ * Version: 3.0.0 - SECURE & COMPLETE
  * ======================================================
  */
 
@@ -16,38 +16,63 @@ if (!defined('BASE_PATH')) {
 require_once dirname(__DIR__) . '/config/db.php';
 
 // ==============================================
-// SESSION & ADMIN AUTHENTICATION
+// SECURE SESSION & ADMIN AUTHENTICATION
 // ==============================================
 SessionManager::init();
 
-// Check if admin is logged in
+// Check if admin is logged in with database-stored token
 $isAdminLoggedIn = false;
+$adminData = null;
 
 if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
-    // Verify admin token
     try {
         $db = Database::getInstance();
         $conn = $db->getConnection();
         
+        // Fetch admin with session token verification from database
         $stmt = $conn->prepare("
-            SELECT id, username, is_admin, is_active 
-            FROM users 
-            WHERE id = :admin_id 
-            AND is_admin = 1 
-            AND is_active = 1
+            SELECT 
+                u.id, 
+                u.username, 
+                u.is_admin, 
+                u.is_active,
+                u.last_login,
+                s.session_token as db_token,
+                s.expires_at
+            FROM users u
+            LEFT JOIN sessions s ON u.id = s.user_id AND s.is_active = 1
+            WHERE u.id = :admin_id 
+            AND u.is_admin = 1 
+            AND u.is_active = 1
         ");
         $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
         $admin = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        if ($admin && $_SESSION['admin_token'] === hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-            $isAdminLoggedIn = true;
+        // Verify admin exists and session token matches
+        if ($admin) {
+            // Check if session token is valid and not expired
+            if ($admin['db_token'] && $admin['db_token'] === $_SESSION['admin_token']) {
+                $expiresAt = strtotime($admin['expires_at']);
+                if ($expiresAt > time()) {
+                    $isAdminLoggedIn = true;
+                    $adminData = $admin;
+                    
+                    // Update last activity
+                    $stmt = $conn->prepare("
+                        UPDATE sessions 
+                        SET last_activity = CURRENT_TIMESTAMP 
+                        WHERE user_id = :admin_id AND is_active = 1
+                    ");
+                    $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
+                }
+            }
         }
     } catch (Exception $e) {
         $isAdminLoggedIn = false;
     }
 }
 
-// Handle login
+// If not logged in, handle login
 if (!$isAdminLoggedIn && isset($_POST['admin_login'])) {
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
@@ -57,36 +82,110 @@ if (!$isAdminLoggedIn && isset($_POST['admin_login'])) {
             $db = Database::getInstance();
             $conn = $db->getConnection();
             
+            // Start transaction for secure login
+            $db->beginTransaction();
+            
             $stmt = $conn->prepare("
                 SELECT id, username, password_hash, is_admin, is_active 
                 FROM users 
                 WHERE username = :username 
                 AND is_admin = 1
+                FOR UPDATE
             ");
             $stmt->execute([':username' => $username]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if ($user && $user['is_active'] == 1 && password_verify($password, $user['password_hash'])) {
+                // Generate secure admin token (stored in database)
+                $adminToken = bin2hex(random_bytes(64));
+                $expiresAt = date('Y-m-d H:i:s', strtotime('+8 hours'));
+                
+                // Store session in database
+                $stmt = $conn->prepare("
+                    INSERT INTO sessions (
+                        user_id,
+                        session_token,
+                        ip_address,
+                        user_agent,
+                        device_type,
+                        expires_at,
+                        is_active,
+                        created_at
+                    ) VALUES (
+                        :user_id,
+                        :token,
+                        :ip,
+                        :user_agent,
+                        :device,
+                        :expires_at,
+                        1,
+                        CURRENT_TIMESTAMP
+                    )
+                ");
+                $stmt->execute([
+                    ':user_id' => $user['id'],
+                    ':token' => $adminToken,
+                    ':ip' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+                    ':user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? 'unknown',
+                    ':device' => 'Admin Panel',
+                    ':expires_at' => $expiresAt
+                ]);
+                
+                // Update last login
+                $stmt = $conn->prepare("
+                    UPDATE users 
+                    SET last_login = CURRENT_TIMESTAMP 
+                    WHERE id = :user_id
+                ");
+                $stmt->execute([':user_id' => $user['id']]);
+                
+                $db->commit();
+                
+                // Set session variables
                 $_SESSION['admin_id'] = $user['id'];
-                $_SESSION['admin_token'] = hash('sha256', $user['id'] . $user['username'] . 'admin_secret');
+                $_SESSION['admin_token'] = $adminToken;
                 $_SESSION['admin_username'] = $user['username'];
                 $_SESSION['admin_logged_in'] = true;
                 
                 header('Location: ' . $_SERVER['PHP_SELF']);
                 exit;
             } else {
+                $db->rollback();
                 $loginError = 'Invalid username or password';
             }
         } catch (Exception $e) {
-            $loginError = 'Database error occurred';
+            if (isset($db) && $db->inTransaction()) {
+                $db->rollback();
+            }
+            $loginError = 'Database error occurred: ' . $e->getMessage();
         }
     } else {
         $loginError = 'Please enter username and password';
     }
 }
 
-// Handle logout
+// Handle logout - secure session destruction
 if (isset($_GET['logout'])) {
+    if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
+        try {
+            $db = Database::getInstance();
+            $conn = $db->getConnection();
+            
+            // Invalidate session in database
+            $stmt = $conn->prepare("
+                UPDATE sessions 
+                SET is_active = 0 
+                WHERE user_id = :user_id AND session_token = :token
+            ");
+            $stmt->execute([
+                ':user_id' => $_SESSION['admin_id'],
+                ':token' => $_SESSION['admin_token']
+            ]);
+        } catch (Exception $e) {
+            // Silent fail - still destroy session
+        }
+    }
+    
     session_destroy();
     header('Location: ' . $_SERVER['PHP_SELF']);
     exit;
@@ -99,7 +198,7 @@ if ($isAdminLoggedIn && isset($_GET['ajax'])) {
 }
 
 // ==============================================
-// ADMIN AJAX HANDLER
+// ADMIN AJAX HANDLER (SECURE)
 // ==============================================
 function handleAdminAjax() {
     $action = $_GET['action'] ?? '';
@@ -108,6 +207,27 @@ function handleAdminAjax() {
     try {
         $db = Database::getInstance();
         $conn = $db->getConnection();
+        
+        // Verify session is still valid
+        $stmt = $conn->prepare("
+            SELECT id 
+            FROM sessions 
+            WHERE user_id = :admin_id 
+            AND session_token = :token 
+            AND is_active = 1 
+            AND expires_at > NOW()
+        ");
+        $stmt->execute([
+            ':admin_id' => $_SESSION['admin_id'],
+            ':token' => $_SESSION['admin_token']
+        ]);
+        
+        if (!$stmt->fetch()) {
+            // Session expired or invalid
+            http_response_code(401);
+            echo json_encode(['success' => false, 'message' => 'Session expired', 'redirect' => true]);
+            exit;
+        }
         
         switch ($action) {
             case 'get_stats':
@@ -153,7 +273,7 @@ function handleAdminAjax() {
 }
 
 // ==============================================
-// ADMIN STATS (ENHANCED)
+// ADMIN STATS (COMPLETE)
 // ==============================================
 function getAdminStats($db, $conn) {
     $stats = [];
@@ -170,6 +290,15 @@ function getAdminStats($db, $conn) {
     ");
     $stats['active_users'] = intval($stmt->fetchColumn());
     
+    // New Users Today
+    $stmt = $conn->query("
+        SELECT COUNT(*) as today 
+        FROM users 
+        WHERE DATE(created_at) = CURDATE() 
+        AND is_admin = 0
+    ");
+    $stats['new_users_today'] = intval($stmt->fetchColumn());
+    
     // Total Matches
     $stmt = $conn->query("SELECT COUNT(*) as total FROM matches");
     $stats['total_matches'] = intval($stmt->fetchColumn());
@@ -181,6 +310,15 @@ function getAdminStats($db, $conn) {
         WHERE status IN ('playing', 'ready')
     ");
     $stats['active_tournaments'] = intval($stmt->fetchColumn());
+    
+    // Completed Matches Today
+    $stmt = $conn->query("
+        SELECT COUNT(*) as today 
+        FROM matches 
+        WHERE DATE(completed_at) = CURDATE() 
+        AND status = 'completed'
+    ");
+    $stats['matches_today'] = intval($stmt->fetchColumn());
     
     // Total Revenue (Admin Commission)
     $stmt = $conn->query("
@@ -251,6 +389,46 @@ function getAdminStats($db, $conn) {
     ");
     $stats['total_tds'] = floatval($stmt->fetchColumn());
     
+    // Total User Balance
+    $stmt = $conn->query("
+        SELECT SUM(wallet_balance) as total 
+        FROM users 
+        WHERE is_admin = 0
+    ");
+    $stats['total_user_balance'] = floatval($stmt->fetchColumn());
+    
+    // Platform Liability (Total User Balance - Total Withdrawn)
+    $stmt = $conn->query("
+        SELECT SUM(total_withdrawn) as total 
+        FROM users 
+        WHERE is_admin = 0
+    ");
+    $stats['total_withdrawn'] = floatval($stmt->fetchColumn());
+    $stats['platform_liability'] = $stats['total_user_balance'] - $stats['total_withdrawn'];
+    
+    // Growth percentages (compared to last month)
+    $stmt = $conn->query("
+        SELECT COUNT(*) as last_month 
+        FROM users 
+        WHERE is_admin = 0 
+        AND created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+        AND created_at < DATE_SUB(NOW(), INTERVAL 60 DAY)
+    ");
+    $lastMonthUsers = intval($stmt->fetchColumn());
+    $stats['user_growth'] = $lastMonthUsers > 0 ? round(($stats['new_users_today'] / $lastMonthUsers) * 100, 1) : 0;
+    
+    $stmt = $conn->query("
+        SELECT SUM(amount) as last_month 
+        FROM transactions 
+        WHERE source = 'deposit' 
+        AND description LIKE '%platform commission%'
+        AND status = 'success'
+        AND DATE(created_at) > DATE_SUB(NOW(), INTERVAL 30 DAY)
+        AND DATE(created_at) < DATE_SUB(NOW(), INTERVAL 60 DAY)
+    ");
+    $lastMonthRevenue = floatval($stmt->fetchColumn());
+    $stats['revenue_growth'] = $lastMonthRevenue > 0 ? round((($stats['today_revenue'] - $lastMonthRevenue) / $lastMonthRevenue) * 100, 1) : 0;
+    
     return ['success' => true, 'data' => $stats];
 }
 
@@ -298,11 +476,35 @@ function getWithdrawalStats($db, $conn) {
         $stmt = $conn->query("SELECT COUNT(*) as completed FROM withdrawals WHERE status = 'completed'");
         $stats['completed'] = intval($stmt->fetchColumn());
         
-        $stmt = $conn->query("SELECT SUM(amount) as total_pending FROM withdrawals WHERE status = 'pending'");
+        $stmt = $conn->query("SELECT COUNT(*) as rejected FROM withdrawals WHERE status = 'rejected'");
+        $stats['rejected'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("
+            SELECT SUM(amount) as total_pending 
+            FROM withdrawals 
+            WHERE status = 'pending'
+        ");
         $stats['total_pending_amount'] = floatval($stmt->fetchColumn());
         
-        $stmt = $conn->query("SELECT SUM(amount) as total_processed FROM withdrawals WHERE status IN ('approved', 'completed')");
+        $stmt = $conn->query("
+            SELECT SUM(amount) as total_processed 
+            FROM withdrawals 
+            WHERE status IN ('approved', 'completed')
+        ");
         $stats['total_processed_amount'] = floatval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("
+            SELECT SUM(amount) as total_amount 
+            FROM withdrawals
+        ");
+        $stats['total_amount'] = floatval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("
+            SELECT COUNT(*) as today 
+            FROM withdrawals 
+            WHERE DATE(created_at) = CURDATE()
+        ");
+        $stats['today'] = intval($stmt->fetchColumn());
         
         return ['success' => true, 'data' => $stats];
     } catch (Exception $e) {
@@ -331,6 +533,22 @@ function getDisputeStats($db, $conn) {
         
         $stmt = $conn->query("SELECT COUNT(*) as total FROM dispute_tickets");
         $stats['total'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("
+            SELECT COUNT(*) as high_priority 
+            FROM dispute_tickets 
+            WHERE priority IN ('high', 'urgent') 
+            AND status IN ('open', 'investigating')
+        ");
+        $stats['high_priority'] = intval($stmt->fetchColumn());
+        
+        $stmt = $conn->query("
+            SELECT SUM(refund_amount) as total_refunds 
+            FROM dispute_tickets 
+            WHERE status = 'resolved' 
+            AND resolution_type = 'refund'
+        ");
+        $stats['total_refunds'] = floatval($stmt->fetchColumn());
         
         return ['success' => true, 'data' => $stats];
     } catch (Exception $e) {
@@ -739,15 +957,13 @@ function getMatchesList($db, $conn) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Command Center - Ludo Tournament Pro</title>
+    <!-- Chart.js for Analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         /* ==============================================
            ADMIN STYLES (FULLY ENHANCED)
            ============================================== */
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -910,6 +1126,31 @@ function getMatchesList($db, $conn) {
         
         .admin-header-actions a.logout:hover {
             background: rgba(239, 68, 68, 0.1);
+        }
+        
+        .admin-header-actions .nav-link {
+            background: rgba(124, 58, 237, 0.1);
+            border-color: rgba(124, 58, 237, 0.15);
+            color: #8b5cf6;
+        }
+        
+        .admin-header-actions .nav-link:hover {
+            background: rgba(124, 58, 237, 0.2);
+        }
+        
+        /* Growth Indicators */
+        .growth-indicator {
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 6px;
+        }
+        
+        .growth-indicator.positive {
+            color: #10b981;
+        }
+        
+        .growth-indicator.negative {
+            color: #ef4444;
         }
         
         /* Stats Grid */
@@ -1315,6 +1556,25 @@ function getMatchesList($db, $conn) {
             to { transform: rotate(360deg); }
         }
         
+        /* Analytics Chart */
+        .chart-container {
+            background: #1a1a2e;
+            border-radius: 14px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            margin-bottom: 20px;
+        }
+        
+        .chart-container h3 {
+            margin-bottom: 16px;
+            color: #f1f5f9;
+        }
+        
+        .chart-wrapper {
+            position: relative;
+            height: 250px;
+        }
+        
         /* Responsive */
         @media (max-width: 768px) {
             .stats-grid {
@@ -1399,10 +1659,10 @@ function getMatchesList($db, $conn) {
             <h1>⚡ Ludo Admin Command Center</h1>
             <div class="admin-header-actions">
                 <span>👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
-                <a href="settings.php" title="System Settings">⚙️ Settings</a>
-                <a href="kyc.php" title="KYC Management">🛡️ KYC</a>
-                <a href="withdrawals.php" title="Withdrawals">🏦 Withdrawals</a>
-                <a href="disputes.php" title="Disputes">📋 Disputes</a>
+                <a href="settings.php" class="nav-link" title="System Settings">⚙️ Settings</a>
+                <a href="kyc.php" class="nav-link" title="KYC Management">🛡️ KYC</a>
+                <a href="withdrawals.php" class="nav-link" title="Withdrawals">🏦 Withdrawals</a>
+                <a href="disputes.php" class="nav-link" title="Disputes">📋 Disputes</a>
                 <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
         </div>
@@ -1434,12 +1694,16 @@ function getMatchesList($db, $conn) {
         <!-- Stats Grid -->
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card">
-                <div class="stat-label">Total Users</div>
+                <div class="stat-label">Total Users <span class="growth-indicator positive" id="userGrowth">+0%</span></div>
                 <div class="stat-value blue" id="statTotalUsers">...</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Active Users (30d)</div>
                 <div class="stat-value green" id="statActiveUsers">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">New Users Today</div>
+                <div class="stat-value cyan" id="statNewUsersToday">...</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Active Tournaments</div>
@@ -1448,6 +1712,10 @@ function getMatchesList($db, $conn) {
             <div class="stat-card">
                 <div class="stat-label">Total Matches</div>
                 <div class="stat-value cyan" id="statTotalMatches">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Matches Today</div>
+                <div class="stat-value blue" id="statMatchesToday">...</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Cashfree Collections</div>
@@ -1462,7 +1730,7 @@ function getMatchesList($db, $conn) {
                 <div class="stat-value green" id="statNetProfit">...</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Today's Revenue</div>
+                <div class="stat-label">Today's Revenue <span class="growth-indicator positive" id="revenueGrowth">+0%</span></div>
                 <div class="stat-value gold" id="statTodayRevenue">...</div>
             </div>
             <div class="stat-card">
@@ -1481,6 +1749,14 @@ function getMatchesList($db, $conn) {
                 <div class="stat-label">Total TDS Deducted</div>
                 <div class="stat-value purple" id="statTotalTDS">...</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">Platform Liability</div>
+                <div class="stat-value orange" id="statLiability">...</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total User Balance</div>
+                <div class="stat-value gold" id="statUserBalance">...</div>
+            </div>
         </div>
         
         <!-- Tabs -->
@@ -1495,6 +1771,11 @@ function getMatchesList($db, $conn) {
         <div class="tab-content active" id="tab-users">
             <div class="search-bar">
                 <input type="text" id="userSearch" placeholder="Search users by name, mobile, or email..." onkeyup="debounceSearch()">
+                <select id="userLimit" onchange="state.usersLimit = parseInt(this.value); state.usersPage = 0; loadUsers();">
+                    <option value="20">20 per page</option>
+                    <option value="50" selected>50 per page</option>
+                    <option value="100">100 per page</option>
+                </select>
                 <button class="btn-action primary" onclick="loadUsers()">🔄 Refresh</button>
             </div>
             <div class="table-container">
@@ -1593,6 +1874,14 @@ function getMatchesList($db, $conn) {
         
         <!-- Tab: Analytics -->
         <div class="tab-content" id="tab-analytics">
+            <!-- Revenue Chart -->
+            <div class="chart-container">
+                <h3>📈 Revenue & Growth (Last 30 Days)</h3>
+                <div class="chart-wrapper">
+                    <canvas id="revenueChart"></canvas>
+                </div>
+            </div>
+            
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
                 <div class="stat-card">
                     <div class="stat-label">Total User Balance</div>
@@ -1613,7 +1902,7 @@ function getMatchesList($db, $conn) {
             </div>
             
             <div style="background: #1a1a2e; border-radius: 14px; padding: 20px; border: 1px solid rgba(255,255,255,0.04);">
-                <h3 style="margin-bottom: 12px;">📈 Financial History (Last 30 Days)</h3>
+                <h3 style="margin-bottom: 12px;">📊 Financial History (Last 30 Days)</h3>
                 <div style="overflow-x: auto;">
                     <table>
                         <thead>
@@ -1682,7 +1971,7 @@ function getMatchesList($db, $conn) {
     <div class="toast" id="adminToast"></div>
     
     <!-- ==============================================
-    ADMIN JAVASCRIPT (ENHANCED)
+    ADMIN JAVASCRIPT (COMPLETE WITH CHART.JS)
     ============================================== -->
     <script>
         // ==============================================
@@ -1693,7 +1982,24 @@ function getMatchesList($db, $conn) {
             usersLimit: 50,
             usersTotal: 0,
             searchTimeout: null,
+            chartInstance: null,
+            revenueData: []
         };
+        
+        // ==============================================
+        // SESSION HANDLER - Check for 401 redirect
+        // ==============================================
+        function handleApiResponse(response) {
+            if (response.status === 401) {
+                // Session expired - redirect to login
+                showToast('Session expired. Redirecting to login...', 'error');
+                setTimeout(() => {
+                    window.location.href = 'index.php';
+                }, 1500);
+                throw new Error('Session expired');
+            }
+            return response.json();
+        }
         
         // ==============================================
         // DOM READY
@@ -1729,7 +2035,7 @@ function getMatchesList($db, $conn) {
         function loadQuickStats() {
             // Load KYC count
             fetch('?ajax=1&action=get_kyc_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('quickKyc').textContent = data.data.pending || 0;
@@ -1739,7 +2045,7 @@ function getMatchesList($db, $conn) {
             
             // Load Withdrawal count
             fetch('?ajax=1&action=get_withdrawal_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('quickWithdrawals').textContent = data.data.pending || 0;
@@ -1749,7 +2055,7 @@ function getMatchesList($db, $conn) {
             
             // Load Dispute count
             fetch('?ajax=1&action=get_dispute_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('quickDisputes').textContent = data.data.open || 0;
@@ -1759,7 +2065,7 @@ function getMatchesList($db, $conn) {
             
             // Check maintenance mode
             fetch('/api/admin_settings.php?action=get_maintenance_status')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('quickMaintenance').textContent = data.data.maintenance_mode ? '🔴 On' : '🟢 Off';
@@ -1774,14 +2080,16 @@ function getMatchesList($db, $conn) {
         // ==============================================
         function loadStats() {
             fetch('?ajax=1&action=get_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         const s = data.data;
                         document.getElementById('statTotalUsers').textContent = s.total_users || 0;
                         document.getElementById('statActiveUsers').textContent = s.active_users || 0;
+                        document.getElementById('statNewUsersToday').textContent = s.new_users_today || 0;
                         document.getElementById('statActiveTournaments').textContent = s.active_tournaments || 0;
                         document.getElementById('statTotalMatches').textContent = s.total_matches || 0;
+                        document.getElementById('statMatchesToday').textContent = s.matches_today || 0;
                         document.getElementById('statCashfree').textContent = '₹' + (s.cashfree_collections || 0).toFixed(2);
                         document.getElementById('statPlatformRevenue').textContent = '₹' + (s.total_platform_revenue || 0).toFixed(2);
                         document.getElementById('statNetProfit').textContent = '₹' + (s.net_platform_profit || 0).toFixed(2);
@@ -1790,6 +2098,17 @@ function getMatchesList($db, $conn) {
                         document.getElementById('statPendingWithdrawals').textContent = s.pending_withdrawals || 0;
                         document.getElementById('statOpenDisputes').textContent = s.open_disputes || 0;
                         document.getElementById('statTotalTDS').textContent = '₹' + (s.total_tds || 0).toFixed(2);
+                        document.getElementById('statLiability').textContent = '₹' + (s.platform_liability || 0).toFixed(2);
+                        document.getElementById('statUserBalance').textContent = '₹' + (s.total_user_balance || 0).toFixed(2);
+                        
+                        // Update growth indicators
+                        const userGrowth = document.getElementById('userGrowth');
+                        userGrowth.textContent = (s.user_growth || 0) >= 0 ? '+' + s.user_growth + '%' : s.user_growth + '%';
+                        userGrowth.className = 'growth-indicator ' + ((s.user_growth || 0) >= 0 ? 'positive' : 'negative');
+                        
+                        const revGrowth = document.getElementById('revenueGrowth');
+                        revGrowth.textContent = (s.revenue_growth || 0) >= 0 ? '+' + s.revenue_growth + '%' : s.revenue_growth + '%';
+                        revGrowth.className = 'growth-indicator ' + ((s.revenue_growth || 0) >= 0 ? 'positive' : 'negative');
                     }
                 })
                 .catch(() => {});
@@ -1805,7 +2124,7 @@ function getMatchesList($db, $conn) {
             document.getElementById('usersTableBody').innerHTML = '<tr><td colspan="10" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
             
             fetch(`?ajax=1&action=get_users&offset=${offset}&limit=${state.usersLimit}&search=${encodeURIComponent(search)}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         state.usersTotal = data.data.total;
@@ -1888,7 +2207,7 @@ function getMatchesList($db, $conn) {
             document.getElementById('matchesTableBody').innerHTML = '<tr><td colspan="10" class="loading"><div class="loading-spinner"></div> Loading...</td></tr>';
             
             fetch(`?ajax=1&action=get_matches&status=${encodeURIComponent(status)}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         renderMatches(data.data.matches);
@@ -1935,7 +2254,7 @@ function getMatchesList($db, $conn) {
             const url = uid > 0 ? `?ajax=1&action=get_transactions&user_id=${uid}` : `?ajax=1&action=get_transactions`;
             
             fetch(url)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         renderTransactions(data.data);
@@ -1970,11 +2289,11 @@ function getMatchesList($db, $conn) {
         }
         
         // ==============================================
-        // LOAD ANALYTICS
+        // LOAD ANALYTICS WITH CHART
         // ==============================================
         function loadAnalytics() {
             fetch('?ajax=1&action=get_financial_metrics&days=30')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         const totals = data.data.totals;
@@ -1983,7 +2302,9 @@ function getMatchesList($db, $conn) {
                         document.getElementById('analyticsTotalWithdrawn').textContent = '₹' + (totals.total_withdrawn || 0).toFixed(2);
                         document.getElementById('analyticsLiability').textContent = '₹' + ((totals.total_user_balance || 0) - (totals.total_withdrawn || 0)).toFixed(2);
                         
-                        renderAnalytics(data.data.history);
+                        state.revenueData = data.data.history;
+                        renderAnalytics(state.revenueData);
+                        renderRevenueChart(state.revenueData);
                     } else {
                         document.getElementById('analyticsTableBody').innerHTML = `<tr><td colspan="7" style="color: #ef4444;">${data.message}</td></tr>`;
                     }
@@ -2011,6 +2332,95 @@ function getMatchesList($db, $conn) {
                     <td style="color: #8b5cf6;">₹${parseFloat(h.total_tds_deducted || 0).toFixed(2)}</td>
                 </tr>
             `).join('');
+        }
+        
+        function renderRevenueChart(history) {
+            const ctx = document.getElementById('revenueChart');
+            if (!ctx) return;
+            
+            if (state.chartInstance) {
+                state.chartInstance.destroy();
+            }
+            
+            const labels = history.map(h => h.metric_date);
+            const revenue = history.map(h => parseFloat(h.daily_platform_revenue || 0));
+            const deposits = history.map(h => parseFloat(h.daily_deposits || 0));
+            const withdrawals = history.map(h => parseFloat(h.daily_withdrawals || 0));
+            
+            state.chartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Deposits',
+                            data: deposits,
+                            backgroundColor: 'rgba(16, 185, 129, 0.5)',
+                            borderColor: '#10b981',
+                            borderWidth: 1,
+                            borderRadius: 4
+                        },
+                        {
+                            label: 'Withdrawals',
+                            data: withdrawals,
+                            backgroundColor: 'rgba(239, 68, 68, 0.5)',
+                            borderColor: '#ef4444',
+                            borderWidth: 1,
+                            borderRadius: 4
+                        },
+                        {
+                            label: 'Platform Revenue',
+                            data: revenue,
+                            backgroundColor: 'rgba(251, 191, 36, 0.5)',
+                            borderColor: '#fbbf24',
+                            borderWidth: 1,
+                            borderRadius: 4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#94a3b8',
+                                font: {
+                                    size: 11,
+                                    family: 'Inter'
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.04)'
+                            },
+                            ticks: {
+                                color: '#94a3b8',
+                                font: {
+                                    size: 10
+                                }
+                            }
+                        },
+                        y: {
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.04)'
+                            },
+                            ticks: {
+                                color: '#94a3b8',
+                                font: {
+                                    size: 10
+                                },
+                                callback: function(value) {
+                                    return '₹' + value;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
         }
         
         // ==============================================
@@ -2052,7 +2462,7 @@ function getMatchesList($db, $conn) {
                     reason: reason
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Balance updated successfully!', 'success');
@@ -2079,7 +2489,7 @@ function getMatchesList($db, $conn) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: userId })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('User status toggled', 'success');
