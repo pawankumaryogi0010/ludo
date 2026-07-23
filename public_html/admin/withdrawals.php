@@ -3,7 +3,7 @@
  * ======================================================
  * ADMIN WITHDRAWALS.PHP - Withdrawals Management UI
  * Ludo Tournament Platform - Admin Withdrawal Dashboard
- * Version: 2.0.0
+ * Version: 2.1.0 - SECURE & ENHANCED
  * ======================================================
  */
 
@@ -16,7 +16,45 @@ require_once dirname(__DIR__) . '/config/db.php';
 
 SessionManager::init();
 
-$isAdminLoggedIn = false;
+// ==============================================
+// SECURE SESSION VALIDATION FUNCTION
+// ==============================================
+function validateAdminSession() {
+    if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
+        return false;
+    }
+    
+    try {
+        $db = Database::getInstance();
+        $conn = $db->getConnection();
+        
+        $stmt = $conn->prepare("
+            SELECT id 
+            FROM sessions 
+            WHERE user_id = :admin_id 
+            AND session_token = :token 
+            AND is_active = 1 
+            AND expires_at > NOW()
+        ");
+        $stmt->execute([
+            ':admin_id' => $_SESSION['admin_id'],
+            ':token' => $_SESSION['admin_token']
+        ]);
+        
+        return $stmt->fetch() !== false;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+// Validate session - redirect if invalid
+if (!validateAdminSession()) {
+    session_destroy();
+    header('Location: index.php');
+    exit;
+}
+
+$isAdminLoggedIn = true;
 
 if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
     try {
@@ -33,7 +71,7 @@ if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
         $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
         $admin = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        if ($admin && $_SESSION['admin_token'] === hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
+        if ($admin) {
             $isAdminLoggedIn = true;
         }
     } catch (Exception $e) {
@@ -520,6 +558,48 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             margin-bottom: 8px;
         }
         
+        /* Pagination Dropdown */
+        .pagination-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        
+        .pagination-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        
+        .pagination-left select {
+            padding: 6px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 13px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        
+        .pagination-left select:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .pagination-left select option {
+            background: #1a1a2e;
+        }
+        
+        .pagination-right {
+            display: flex;
+            gap: 8px;
+        }
+        
         @media (max-width: 768px) {
             .withdrawal-card .wd-details {
                 grid-template-columns: 1fr;
@@ -527,6 +607,11 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             
             .stats-bar {
                 grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .pagination-controls {
+                flex-direction: column;
+                align-items: flex-start;
             }
         }
         
@@ -548,6 +633,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                 <a href="index.php">← Back to Dashboard</a>
                 <a href="settings.php">⚙️ Settings</a>
                 <a href="kyc.php">🛡️ KYC</a>
+                <a href="disputes.php">📋 Disputes</a>
                 <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
         </div>
@@ -598,10 +684,17 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             </div>
         </div>
         
-        <!-- Pagination -->
-        <div style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span id="paginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
-            <div style="display: flex; gap: 8px;">
+        <!-- Updated Pagination with Records Per Page Dropdown -->
+        <div class="pagination-controls">
+            <div class="pagination-left">
+                <span id="paginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
+                <select id="withdrawalLimit" onchange="state.limit = parseInt(this.value); state.currentPage = 0; loadWithdrawals();">
+                    <option value="20">20 per page</option>
+                    <option value="50" selected>50 per page</option>
+                    <option value="100">100 per page</option>
+                </select>
+            </div>
+            <div class="pagination-right">
                 <button class="btn-action view" onclick="prevPage()" id="prevBtn">← Prev</button>
                 <button class="btn-action view" onclick="nextPage()" id="nextBtn">Next →</button>
             </div>
@@ -672,7 +765,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
     <div class="toast" id="adminToast"></div>
     
     <!-- ==============================================
-    JAVASCRIPT
+    JAVASCRIPT - UPDATED WITH 401 HANDLER & PAGINATION
     ============================================== -->
     <script>
         // ==============================================
@@ -680,11 +773,26 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         // ==============================================
         let state = {
             currentPage: 0,
-            limit: 20,
+            limit: 50, // Changed from 20 to 50
             total: 0,
             status: '<?php echo $statusFilter; ?>',
             csrfToken: '<?php echo $csrf_token; ?>'
         };
+        
+        // ==============================================
+        // SESSION HANDLER - Check for 401 redirect
+        // ==============================================
+        function handleApiResponse(response) {
+            if (response.status === 401) {
+                // Session expired - redirect to login
+                showToast('Session expired. Redirecting to login...', 'error');
+                setTimeout(() => {
+                    window.location.href = 'index.php';
+                }, 1500);
+                throw new Error('Session expired');
+            }
+            return response.json();
+        }
         
         // ==============================================
         // DOM READY
@@ -709,7 +817,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         // ==============================================
         function loadStats() {
             fetch('/api/admin_withdrawals.php?action=get_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('statPending').textContent = data.data.pending || 0;
@@ -724,7 +832,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         // ==============================================
-        // LOAD WITHDRAWALS
+        // LOAD WITHDRAWALS - UPDATED WITH state.limit
         // ==============================================
         function loadWithdrawals() {
             const listEl = document.getElementById('withdrawalList');
@@ -734,7 +842,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             const status = state.status === 'all' ? '' : state.status;
             
             fetch(`/api/admin_withdrawals.php?action=list&status=${status}&offset=${offset}&limit=${state.limit}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         state.total = data.data.total;
@@ -827,7 +935,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         // ==============================================
-        // PAGINATION
+        // PAGINATION - UPDATED WITH state.limit
         // ==============================================
         function updatePagination() {
             const totalPages = Math.ceil(state.total / state.limit);
@@ -856,7 +964,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         // ==============================================
-        // APPROVE WITHDRAWAL
+        // APPROVE WITHDRAWAL - UPDATED WITH 401 HANDLER
         // ==============================================
         function approveWithdrawal(id) {
             if (!confirm('Are you sure you want to approve this withdrawal? This will deduct from user wallet.')) return;
@@ -878,7 +986,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Withdrawal approved successfully!', 'success');
@@ -900,7 +1008,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         // ==============================================
-        // REJECT WITHDRAWAL
+        // REJECT WITHDRAWAL - UPDATED WITH 401 HANDLER
         // ==============================================
         function openRejectModal(id) {
             document.getElementById('rejectWdId').value = id;
@@ -933,7 +1041,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('Withdrawal rejected and amount refunded', 'success');
@@ -954,7 +1062,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         // ==============================================
-        // ACTION MODAL (Process / Complete)
+        // ACTION MODAL (Process / Complete) - UPDATED WITH 401 HANDLER
         // ==============================================
         function openActionModal(id, action) {
             document.getElementById('actionWdId').value = id;
@@ -992,7 +1100,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast(data.message || 'Action completed successfully', 'success');
@@ -1013,7 +1121,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         // ==============================================
-        // VIEW WITHDRAWAL DETAILS
+        // VIEW WITHDRAWAL DETAILS - UPDATED WITH 401 HANDLER
         // ==============================================
         function viewWithdrawal(id) {
             const modal = document.getElementById('viewModal');
@@ -1022,7 +1130,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             modal.classList.add('active');
             
             fetch(`/api/admin_withdrawals.php?action=get&id=${id}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         renderViewDetails(data.data);
