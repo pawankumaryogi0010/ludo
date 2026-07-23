@@ -2,7 +2,7 @@
 /**
  * ======================================================
  * ADMIN KYC.PHP - KYC Management UI
- * Ludo Tournament Platform - KYC Dashboard
+ * Ludo Tournament Platform - Admin KYC Dashboard
  * Version: 2.0.0
  * ======================================================
  */
@@ -12,48 +12,48 @@ if (!defined('BASE_PATH')) {
     define('BASE_PATH', dirname(__DIR__));
 }
 
-// Include configuration
 require_once dirname(__DIR__) . '/config/db.php';
 
-// ==============================================
-// SESSION & ADMIN AUTHENTICATION
-// ==============================================
 SessionManager::init();
 
-$isAdminLoggedIn = false;
-
-if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
+// ==============================================
+// SECURE SESSION VALIDATION
+// ==============================================
+function validateAdminSession() {
+    if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
+        return false;
+    }
+    
     try {
         $db = Database::getInstance();
         $conn = $db->getConnection();
         
         $stmt = $conn->prepare("
-            SELECT id, username, is_admin, is_active 
-            FROM users 
-            WHERE id = :admin_id 
-            AND is_admin = 1 
-            AND is_active = 1
+            SELECT id 
+            FROM sessions 
+            WHERE user_id = :admin_id 
+            AND session_token = :token 
+            AND is_active = 1 
+            AND expires_at > NOW()
         ");
-        $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
-        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+        $stmt->execute([
+            ':admin_id' => $_SESSION['admin_id'],
+            ':token' => $_SESSION['admin_token']
+        ]);
         
-        if ($admin && $_SESSION['admin_token'] === hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-            $isAdminLoggedIn = true;
-        }
+        return $stmt->fetch() !== false;
     } catch (Exception $e) {
-        $isAdminLoggedIn = false;
+        return false;
     }
 }
 
-if (!$isAdminLoggedIn) {
+if (!validateAdminSession()) {
+    session_destroy();
     header('Location: index.php');
     exit;
 }
 
-// Generate CSRF token
 $csrf_token = CSRFToken::generate();
-
-// Get filter parameter
 $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
 ?>
 <!DOCTYPE html>
@@ -63,14 +63,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KYC Management - Admin Dashboard</title>
     <style>
-        /* ==============================================
-           KYC ADMIN STYLES
-           ============================================== */
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -108,6 +101,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             display: flex;
             align-items: center;
             gap: 16px;
+            flex-wrap: wrap;
         }
         
         .admin-header-actions a {
@@ -123,6 +117,15 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         
         .admin-header-actions a:hover {
             background: rgba(255, 255, 255, 0.04);
+        }
+        
+        .admin-header-actions a.logout {
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+        
+        .admin-header-actions a.logout:hover {
+            background: rgba(239, 68, 68, 0.1);
         }
         
         /* Stats Bar */
@@ -157,7 +160,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         .stat-card .stat-number.rejected { color: #ef4444; }
         .stat-card .stat-number.total { color: #3b82f6; }
         
-        /* Filters */
+        /* Filter Bar */
         .filter-bar {
             display: flex;
             gap: 8px;
@@ -187,6 +190,35 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             background: rgba(124, 58, 237, 0.2);
             color: #8b5cf6;
             border-color: rgba(124, 58, 237, 0.2);
+        }
+        
+        /* Search Bar */
+        .search-bar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        
+        .search-bar input {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px 14px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        
+        .search-bar input:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .search-bar input::placeholder {
+            color: #64748b;
         }
         
         /* KYC List */
@@ -239,20 +271,9 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             font-weight: 600;
         }
         
-        .status-badge.pending {
-            background: rgba(245, 158, 11, 0.15);
-            color: #f59e0b;
-        }
-        
-        .status-badge.verified {
-            background: rgba(16, 185, 129, 0.15);
-            color: #10b981;
-        }
-        
-        .status-badge.rejected {
-            background: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-        }
+        .status-badge.pending { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+        .status-badge.verified { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .status-badge.rejected { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
         
         .kyc-card .kyc-details {
             display: grid;
@@ -301,6 +322,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         
         .kyc-card .document-image:hover {
             border-color: rgba(124, 58, 237, 0.3);
+            transform: scale(1.02);
         }
         
         .kyc-card .document-image .img-placeholder {
@@ -483,6 +505,24 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             background: rgba(239, 68, 68, 0.3);
         }
         
+        /* Image Zoom Modal */
+        .zoom-modal .modal-box {
+            max-width: 90vw;
+            max-height: 90vh;
+            background: rgba(0, 0, 0, 0.9);
+            border: none;
+            box-shadow: none;
+            padding: 20px;
+        }
+        
+        .zoom-modal .modal-box img {
+            max-width: 100%;
+            max-height: 80vh;
+            border-radius: 8px;
+            display: block;
+            margin: 0 auto;
+        }
+        
         /* Toast */
         .toast {
             position: fixed;
@@ -504,25 +544,10 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             opacity: 1;
         }
         
-        .toast.success {
-            background: rgba(16, 185, 129, 0.2);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            color: #10b981;
-        }
+        .toast.success { background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.2); color: #10b981; }
+        .toast.error { background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .toast.info { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; }
         
-        .toast.error {
-            background: rgba(239, 68, 68, 0.2);
-            border: 1px solid rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-        }
-        
-        .toast.info {
-            background: rgba(59, 130, 246, 0.2);
-            border: 1px solid rgba(59, 130, 246, 0.2);
-            color: #3b82f6;
-        }
-        
-        /* Loading */
         .loading {
             text-align: center;
             padding: 40px;
@@ -543,7 +568,6 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             to { transform: rotate(360deg); }
         }
         
-        /* No results */
         .no-results {
             text-align: center;
             padding: 60px 20px;
@@ -561,7 +585,47 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             margin-bottom: 8px;
         }
         
-        /* Responsive */
+        .pagination-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        
+        .pagination-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        
+        .pagination-left select {
+            padding: 6px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            color: #f1f5f9;
+            font-size: 13px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        
+        .pagination-left select:focus {
+            outline: none;
+            border-color: #7c3aed;
+        }
+        
+        .pagination-left select option {
+            background: #1a1a2e;
+        }
+        
+        .pagination-right {
+            display: flex;
+            gap: 8px;
+        }
+        
         @media (max-width: 768px) {
             .kyc-card .kyc-details {
                 grid-template-columns: 1fr;
@@ -574,6 +638,17 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             .stats-bar {
                 grid-template-columns: repeat(2, 1fr);
             }
+            
+            .pagination-controls {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .stats-bar {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -584,9 +659,12 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         <div class="admin-header">
             <h1>🛡️ KYC Management</h1>
             <div class="admin-header-actions">
-                <span style="color: #94a3b8; font-size: 14px;">👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
+                <span>👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
                 <a href="index.php">← Back to Dashboard</a>
-                <a href="?logout=1">🚪 Logout</a>
+                <a href="settings.php">⚙️ Settings</a>
+                <a href="withdrawals.php">🏦 Withdrawals</a>
+                <a href="disputes.php">📋 Disputes</a>
+                <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
         </div>
         
@@ -609,17 +687,22 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                 <div class="stat-label">Total Submitted</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number" id="statToday">...</div>
+                <div class="stat-number" id="statToday" style="color: #06b6d4;">...</div>
                 <div class="stat-label">Today's Submissions</div>
             </div>
         </div>
         
-        <!-- Filter Bar -->
+        <!-- Filter & Search -->
         <div class="filter-bar">
             <button class="filter-btn <?php echo $statusFilter === 'pending' ? 'active' : ''; ?>" data-status="pending">⏳ Pending</button>
             <button class="filter-btn <?php echo $statusFilter === 'verified' ? 'active' : ''; ?>" data-status="verified">✅ Verified</button>
             <button class="filter-btn <?php echo $statusFilter === 'rejected' ? 'active' : ''; ?>" data-status="rejected">❌ Rejected</button>
             <button class="filter-btn <?php echo $statusFilter === 'all' ? 'active' : ''; ?>" data-status="all">📋 All</button>
+        </div>
+        
+        <div class="search-bar">
+            <input type="text" id="kycSearch" placeholder="Search by username, mobile, or document number..." onkeyup="debounceSearch()">
+            <button class="btn-action view" onclick="loadKycList()">🔄 Refresh</button>
         </div>
         
         <!-- KYC List -->
@@ -631,9 +714,16 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         </div>
         
         <!-- Pagination -->
-        <div style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span id="paginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
-            <div style="display: flex; gap: 8px;">
+        <div class="pagination-controls">
+            <div class="pagination-left">
+                <span id="paginationInfo" style="color: #94a3b8; font-size: 14px;"></span>
+                <select id="kycLimit" onchange="state.limit = parseInt(this.value); state.currentPage = 0; loadKycList();">
+                    <option value="20">20 per page</option>
+                    <option value="50" selected>50 per page</option>
+                    <option value="100">100 per page</option>
+                </select>
+            </div>
+            <div class="pagination-right">
                 <button class="btn-action view" onclick="prevPage()" id="prevBtn">← Prev</button>
                 <button class="btn-action view" onclick="nextPage()" id="nextBtn">Next →</button>
             </div>
@@ -642,12 +732,12 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
     </div>
     
     <!-- ==============================================
-    MODAL: Reject Reason
+    MODAL: Reject KYC
     ============================================== -->
     <div class="modal-overlay" id="rejectModal">
         <div class="modal-box">
             <h2>❌ Reject KYC</h2>
-            <p style="color: #94a3b8; margin-bottom: 16px;">Please provide a reason for rejecting this KYC document. This will be visible to the user.</p>
+            <p style="color: #94a3b8; margin-bottom: 16px;">Please provide a reason for rejecting this KYC document.</p>
             <input type="hidden" id="rejectKycId" value="">
             <div class="form-group">
                 <label for="rejectReason">Rejection Reason</label>
@@ -661,17 +751,29 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
     </div>
     
     <!-- ==============================================
-    MODAL: View Document
+    MODAL: View Document Details
     ============================================== -->
     <div class="modal-overlay" id="viewModal">
-        <div class="modal-box" style="max-width: 800px;">
+        <div class="modal-box" style="max-width: 700px;">
             <h2>📄 Document Details</h2>
-            <div id="viewDocumentContent">
-                <div class="loading">Loading document details...</div>
+            <div id="viewContent">
+                <div class="loading">Loading...</div>
             </div>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeModal('viewModal')">Close</button>
             </div>
+        </div>
+    </div>
+    
+    <!-- ==============================================
+    MODAL: Image Zoom
+    ============================================== -->
+    <div class="modal-overlay zoom-modal" id="imageZoomModal">
+        <div class="modal-box">
+            <div style="text-align: right; margin-bottom: 12px;">
+                <button onclick="closeModal('imageZoomModal')" style="background: rgba(255,255,255,0.1); color: white; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px;">✕ Close</button>
+            </div>
+            <img id="zoomImage" src="" alt="Zoomed Image">
         </div>
     </div>
     
@@ -689,11 +791,35 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         // ==============================================
         let state = {
             currentPage: 0,
-            limit: 20,
+            limit: 50,
             total: 0,
             status: '<?php echo $statusFilter; ?>',
-            csrfToken: '<?php echo $csrf_token; ?>'
+            search: '',
+            csrfToken: '<?php echo $csrf_token; ?>',
+            searchTimeout: null
         };
+        
+        // ==============================================
+        // SESSION HANDLER - Check for 401 redirect
+        // ==============================================
+        function handleApiResponse(response) {
+            if (response.status === 401) {
+                showToast('Session expired. Redirecting to login...', 'error');
+                setTimeout(() => {
+                    window.location.href = 'index.php';
+                }, 1500);
+                throw new Error('Session expired');
+            }
+            return response.json();
+        }
+        
+        // ==============================================
+        // IMAGE ZOOM FUNCTION
+        // ==============================================
+        function zoomImage(src) {
+            document.getElementById('zoomImage').src = src;
+            document.getElementById('imageZoomModal').classList.add('active');
+        }
         
         // ==============================================
         // DOM READY
@@ -702,7 +828,6 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             loadStats();
             loadKycList();
             
-            // Filter buttons
             document.querySelectorAll('.filter-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
                     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
@@ -719,7 +844,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         // ==============================================
         function loadStats() {
             fetch('/api/admin_kyc.php?action=get_stats')
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         document.getElementById('statPending').textContent = data.data.pending || 0;
@@ -742,8 +867,8 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             const offset = state.currentPage * state.limit;
             const status = state.status === 'all' ? '' : state.status;
             
-            fetch(`/api/admin_kyc.php?action=list&status=${status}&offset=${offset}&limit=${state.limit}`)
-                .then(res => res.json())
+            fetch(`/api/admin_kyc.php?action=list&status=${status}&offset=${offset}&limit=${state.limit}&search=${encodeURIComponent(state.search)}`)
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         state.total = data.data.total;
@@ -779,7 +904,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                             <span class="user-name">${escapeHtml(doc.username || 'Unknown User')}</span>
                             <span class="user-detail">📱 ${escapeHtml(doc.mobile || 'N/A')} • 📧 ${escapeHtml(doc.email || 'N/A')}</span>
                             <span class="user-detail">🆔 User ID: #${doc.user_id}</span>
-                            <span class="user-detail">💰 Wallet: ₹${parseFloat(doc.wallet_balance || 0).toFixed(2)} • 💰 Earnings: ₹${parseFloat(doc.total_earnings || 0).toFixed(2)}</span>
+                            <span class="user-detail">💰 Wallet: ₹${parseFloat(doc.wallet_balance || 0).toFixed(2)}</span>
                         </div>
                         <span class="status-badge ${doc.status}">${doc.status.toUpperCase()}</span>
                     </div>
@@ -809,12 +934,6 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                             <div class="label">Submitted</div>
                             <div class="value">${doc.created_at ? new Date(doc.created_at).toLocaleString() : 'N/A'}</div>
                         </div>
-                        ${doc.verified_at ? `
-                        <div class="detail-item">
-                            <div class="label">Verified At</div>
-                            <div class="value">${new Date(doc.verified_at).toLocaleString()}</div>
-                        </div>
-                        ` : ''}
                     </div>
                     
                     ${doc.document_image_front ? `
@@ -838,20 +957,18 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     </div>
                     ` : ''}
                     
-                    ${doc.status === 'pending' ? `
                     <div class="action-buttons">
-                        <button class="btn-action verify" onclick="verifyKyc(${doc.id})">✅ Verify</button>
-                        <button class="btn-action reject" onclick="openRejectModal(${doc.id})">❌ Reject</button>
-                        <button class="btn-action view" onclick="viewDocument(${doc.id})">👁️ View Details</button>
+                        ${doc.status === 'pending' ? `
+                            <button class="btn-action verify" onclick="verifyKyc(${doc.id})">✅ Verify</button>
+                            <button class="btn-action reject" onclick="openRejectModal(${doc.id})">❌ Reject</button>
+                            <button class="btn-action view" onclick="viewDocument(${doc.id})">👁️ View Details</button>
+                        ` : `
+                            <button class="btn-action view" onclick="viewDocument(${doc.id})">👁️ View Details</button>
+                            ${doc.status === 'rejected' ? `
+                            <button class="btn-action verify" onclick="verifyKyc(${doc.id})">🔄 Re-verify</button>
+                            ` : ''}
+                        `}
                     </div>
-                    ` : `
-                    <div class="action-buttons">
-                        <button class="btn-action view" onclick="viewDocument(${doc.id})">👁️ View Details</button>
-                        ${doc.status === 'rejected' ? `
-                        <button class="btn-action verify" onclick="verifyKyc(${doc.id})">🔄 Re-verify</button>
-                        ` : ''}
-                    </div>
-                    `}
                 </div>
             `).join('');
         }
@@ -885,6 +1002,15 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             }
         }
         
+        function debounceSearch() {
+            clearTimeout(state.searchTimeout);
+            state.searchTimeout = setTimeout(() => {
+                state.search = document.getElementById('kycSearch').value;
+                state.currentPage = 0;
+                loadKycList();
+            }, 400);
+        }
+        
         // ==============================================
         // VERIFY KYC
         // ==============================================
@@ -908,7 +1034,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('KYC verified successfully!', 'success');
@@ -963,7 +1089,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     csrf_token: state.csrfToken
                 })
             })
-            .then(res => res.json())
+            .then(handleApiResponse)
             .then(data => {
                 if (data.success) {
                     showToast('KYC rejected successfully', 'success');
@@ -988,12 +1114,12 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         // ==============================================
         function viewDocument(id) {
             const modal = document.getElementById('viewModal');
-            const content = document.getElementById('viewDocumentContent');
+            const content = document.getElementById('viewContent');
             content.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p>Loading...</p></div>';
             modal.classList.add('active');
             
             fetch(`/api/admin_kyc.php?action=get&id=${id}`)
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         renderDocumentDetails(data.data);
@@ -1007,7 +1133,18 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         }
         
         function renderDocumentDetails(doc) {
-            const content = document.getElementById('viewDocumentContent');
+            const content = document.getElementById('viewContent');
+            
+            // Handle image zoom for document images
+            const frontImage = doc.document_image_front ? 
+                `<span onclick="zoomImage('${escapeHtml(doc.document_image_front)}')" style="cursor: pointer; color: #3b82f6; text-decoration: underline;">View Front Image</span>` : 
+                'N/A';
+            const backImage = doc.document_image_back ? 
+                `<span onclick="zoomImage('${escapeHtml(doc.document_image_back)}')" style="cursor: pointer; color: #3b82f6; text-decoration: underline;">View Back Image</span>` : 
+                'N/A';
+            const selfieImage = doc.selfie_image ? 
+                `<span onclick="zoomImage('${escapeHtml(doc.selfie_image)}')" style="cursor: pointer; color: #3b82f6; text-decoration: underline;">View Selfie</span>` : 
+                'N/A';
             
             content.innerHTML = `
                 <div style="display: grid; gap: 12px;">
@@ -1017,6 +1154,9 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
                     <div><strong>Document Type:</strong> ${doc.document_type.toUpperCase()}</div>
                     <div><strong>Document Number:</strong> ${escapeHtml(doc.document_number)}</div>
                     <div><strong>Status:</strong> <span class="status-badge ${doc.status}">${doc.status.toUpperCase()}</span></div>
+                    <div><strong>Front Image:</strong> ${frontImage}</div>
+                    <div><strong>Back Image:</strong> ${backImage}</div>
+                    <div><strong>Selfie:</strong> ${selfieImage}</div>
                     ${doc.bank_account_number ? `
                         <div><strong>Bank Account:</strong> ${escapeHtml(doc.bank_account_number)}</div>
                         <div><strong>IFSC Code:</strong> ${escapeHtml(doc.bank_ifsc)}</div>
@@ -1043,7 +1183,6 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             document.getElementById(id).classList.remove('active');
         }
         
-        // Close modal on overlay click
         document.querySelectorAll('.modal-overlay').forEach(modal => {
             modal.addEventListener('click', function(e) {
                 if (e.target === this) {
@@ -1053,7 +1192,7 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
         });
         
         // ==============================================
-        // TOAST NOTIFICATIONS
+        // TOAST & UTILITY
         // ==============================================
         function showToast(message, type = 'info') {
             const toast = document.getElementById('adminToast');
@@ -1066,9 +1205,6 @@ $statusFilter = isset($_GET['status']) ? $_GET['status'] : 'pending';
             }, 4000);
         }
         
-        // ==============================================
-        // UTILITY: Escape HTML
-        // ==============================================
         function escapeHtml(str) {
             if (!str) return '';
             const div = document.createElement('div');
