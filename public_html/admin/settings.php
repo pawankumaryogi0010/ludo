@@ -12,48 +12,48 @@ if (!defined('BASE_PATH')) {
     define('BASE_PATH', dirname(__DIR__));
 }
 
-// Include configuration
 require_once dirname(__DIR__) . '/config/db.php';
 
-// ==============================================
-// SESSION & ADMIN AUTHENTICATION
-// ==============================================
 SessionManager::init();
 
-// Check if admin is logged in
-$isAdminLoggedIn = false;
-
-if (isset($_SESSION['admin_id']) && isset($_SESSION['admin_token'])) {
+// ==============================================
+// SECURE SESSION VALIDATION
+// ==============================================
+function validateAdminSession() {
+    if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
+        return false;
+    }
+    
     try {
         $db = Database::getInstance();
         $conn = $db->getConnection();
         
         $stmt = $conn->prepare("
-            SELECT id, username, is_admin, is_active 
-            FROM users 
-            WHERE id = :admin_id 
-            AND is_admin = 1 
-            AND is_active = 1
+            SELECT id 
+            FROM sessions 
+            WHERE user_id = :admin_id 
+            AND session_token = :token 
+            AND is_active = 1 
+            AND expires_at > NOW()
         ");
-        $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
-        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+        $stmt->execute([
+            ':admin_id' => $_SESSION['admin_id'],
+            ':token' => $_SESSION['admin_token']
+        ]);
         
-        if ($admin && $_SESSION['admin_token'] === hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-            $isAdminLoggedIn = true;
-        }
+        return $stmt->fetch() !== false;
     } catch (Exception $e) {
-        $isAdminLoggedIn = false;
+        return false;
     }
 }
 
-if (!$isAdminLoggedIn) {
+if (!validateAdminSession()) {
+    session_destroy();
     header('Location: index.php');
     exit;
 }
 
-// Generate CSRF token
 $csrf_token = CSRFToken::generate();
-
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -62,14 +62,7 @@ $csrf_token = CSRFToken::generate();
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>System Settings - Admin Dashboard</title>
     <style>
-        /* ==============================================
-           ADMIN SETTINGS STYLES
-           ============================================== */
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -107,6 +100,7 @@ $csrf_token = CSRFToken::generate();
             display: flex;
             align-items: center;
             gap: 16px;
+            flex-wrap: wrap;
         }
         
         .admin-header-actions a {
@@ -124,7 +118,16 @@ $csrf_token = CSRFToken::generate();
             background: rgba(255, 255, 255, 0.04);
         }
         
-        /* Settings Layout */
+        .admin-header-actions a.logout {
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+        
+        .admin-header-actions a.logout:hover {
+            background: rgba(239, 68, 68, 0.1);
+        }
+        
+        /* Settings Grid */
         .settings-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -141,7 +144,7 @@ $csrf_token = CSRFToken::generate();
         .settings-section h2 {
             font-size: 18px;
             font-weight: 700;
-            margin-bottom: 16px;
+            margin-bottom: 8px;
             color: #f1f5f9;
         }
         
@@ -243,6 +246,43 @@ $csrf_token = CSRFToken::generate();
             transform: none;
         }
         
+        /* Maintenance Toggle */
+        .maintenance-box {
+            background: rgba(239, 68, 68, 0.05);
+            border: 1px solid rgba(239, 68, 68, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 16px;
+        }
+        
+        .maintenance-box.active {
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+        
+        .maintenance-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-indicator.on {
+            background: #ef4444;
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
+        }
+        
+        .status-indicator.off {
+            background: #10b981;
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+        }
+        
         .btn-toggle {
             padding: 10px 24px;
             border: none;
@@ -293,23 +333,9 @@ $csrf_token = CSRFToken::generate();
             opacity: 1;
         }
         
-        .toast.success {
-            background: rgba(16, 185, 129, 0.2);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            color: #10b981;
-        }
-        
-        .toast.error {
-            background: rgba(239, 68, 68, 0.2);
-            border: 1px solid rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-        }
-        
-        .toast.info {
-            background: rgba(59, 130, 246, 0.2);
-            border: 1px solid rgba(59, 130, 246, 0.2);
-            color: #3b82f6;
-        }
+        .toast.success { background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.2); color: #10b981; }
+        .toast.error { background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .toast.info { background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; }
         
         /* Loading */
         .loading {
@@ -332,47 +358,14 @@ $csrf_token = CSRFToken::generate();
             to { transform: rotate(360deg); }
         }
         
-        /* Maintenance Toggle */
-        .maintenance-box {
-            background: rgba(239, 68, 68, 0.05);
-            border: 1px solid rgba(239, 68, 68, 0.1);
-            border-radius: 12px;
-            padding: 20px;
-            margin-top: 16px;
-        }
-        
-        .maintenance-box.active {
-            border-color: rgba(239, 68, 68, 0.3);
-        }
-        
-        .maintenance-status {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
-        }
-        
-        .status-indicator {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-        
-        .status-indicator.on {
-            background: #ef4444;
-            box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
-        }
-        
-        .status-indicator.off {
-            background: #10b981;
-            box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
-        }
-        
-        /* Responsive */
         @media (max-width: 768px) {
             .settings-grid {
                 grid-template-columns: 1fr;
+            }
+            
+            .admin-header {
+                flex-direction: column;
+                align-items: flex-start;
             }
         }
     </style>
@@ -384,9 +377,12 @@ $csrf_token = CSRFToken::generate();
         <div class="admin-header">
             <h1>⚙️ System Settings</h1>
             <div class="admin-header-actions">
-                <span style="color: #94a3b8; font-size: 14px;">👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
+                <span>👋 <?php echo htmlspecialchars($_SESSION['admin_username'] ?? 'Admin'); ?></span>
                 <a href="index.php">← Back to Dashboard</a>
-                <a href="?logout=1">🚪 Logout</a>
+                <a href="kyc.php">🛡️ KYC</a>
+                <a href="withdrawals.php">🏦 Withdrawals</a>
+                <a href="disputes.php">📋 Disputes</a>
+                <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
         </div>
         
@@ -410,6 +406,27 @@ $csrf_token = CSRFToken::generate();
     ============================================== -->
     <script>
         // ==============================================
+        // STATE
+        // ==============================================
+        let state = {
+            csrfToken: '<?php echo $csrf_token; ?>'
+        };
+        
+        // ==============================================
+        // SESSION HANDLER - Check for 401 redirect
+        // ==============================================
+        function handleApiResponse(response) {
+            if (response.status === 401) {
+                showToast('Session expired. Redirecting to login...', 'error');
+                setTimeout(() => {
+                    window.location.href = 'index.php';
+                }, 1500);
+                throw new Error('Session expired');
+            }
+            return response.json();
+        }
+        
+        // ==============================================
         // MAIN SETTINGS APP
         // ==============================================
         const SettingsApp = {
@@ -422,7 +439,7 @@ $csrf_token = CSRFToken::generate();
             
             loadSettings() {
                 fetch('/api/admin_settings.php?action=get_settings')
-                    .then(res => res.json())
+                    .then(handleApiResponse)
                     .then(data => {
                         if (data.success) {
                             this.settings = data.data.settings;
@@ -440,7 +457,6 @@ $csrf_token = CSRFToken::generate();
                 const container = document.getElementById('settingsContainer');
                 let html = '';
                 
-                // Define setting groups order and display names
                 const groups = {
                     'financial': '💰 Financial Settings',
                     'gameplay': '🎮 Gameplay Settings',
@@ -450,7 +466,6 @@ $csrf_token = CSRFToken::generate();
                     'referral': '🎁 Referral Settings'
                 };
                 
-                // Render each group
                 for (const [groupKey, groupLabel] of Object.entries(groups)) {
                     if (this.settings[groupKey] && this.settings[groupKey].length > 0) {
                         html += this.renderGroup(groupKey, groupLabel, this.settings[groupKey]);
@@ -470,7 +485,9 @@ $csrf_token = CSRFToken::generate();
                 `;
                 
                 settings.forEach(setting => {
-                    html += this.renderSettingField(setting);
+                    if (setting.is_editable) {
+                        html += this.renderSettingField(setting);
+                    }
                 });
                 
                 // Add maintenance toggle for system group
@@ -578,12 +595,9 @@ $csrf_token = CSRFToken::generate();
                         const key = input.id.replace('setting_', '');
                         let value = input.value;
                         
-                        // Handle checkbox
                         if (input.type === 'checkbox') {
                             value = input.checked;
-                        }
-                        // Handle number
-                        else if (input.type === 'number') {
+                        } else if (input.type === 'number') {
                             value = parseFloat(value);
                         }
                         
@@ -618,11 +632,11 @@ $csrf_token = CSRFToken::generate();
                         csrf_token: this.csrfToken
                     })
                 })
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         this.showToast('Settings saved successfully!', 'success');
-                        this.loadSettings(); // Reload to get updated values
+                        this.loadSettings();
                     } else {
                         this.showToast(data.message || 'Failed to save settings', 'error');
                     }
@@ -656,7 +670,7 @@ $csrf_token = CSRFToken::generate();
                         csrf_token: this.csrfToken
                     })
                 })
-                .then(res => res.json())
+                .then(handleApiResponse)
                 .then(data => {
                     if (data.success) {
                         this.showToast(data.message, 'success');
@@ -677,8 +691,7 @@ $csrf_token = CSRFToken::generate();
                         const groupElement = this.closest('.settings-section');
                         if (groupElement) {
                             const groupKey = groupElement.dataset.group;
-                            // Auto-save for boolean settings
-                            // (optional: you can remove this if you prefer manual save)
+                            // Optional: auto-save for boolean settings
                         }
                     });
                 });
