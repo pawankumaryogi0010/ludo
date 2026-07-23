@@ -1,7 +1,7 @@
 <?php
 /**
  * ======================================================
- * ADMIN_SETTINGS.PHP - System Settings API Handler
+ * ADMIN_SETTINGS.PHP - System Settings API
  * Ludo Tournament Platform - Admin Settings Management
  * Version: 2.0.0
  * ======================================================
@@ -12,34 +12,27 @@ if (!defined('BASE_PATH')) {
     define('BASE_PATH', dirname(__DIR__));
 }
 
-// Include configuration
 require_once dirname(__DIR__) . '/config/db.php';
 
-// Set headers for JSON response
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 
-// ==============================================
-// CORS Headers
-// ==============================================
 header('Access-Control-Allow-Origin: ' . BASE_URL);
 header('Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, X-CSRF-Token');
 header('Access-Control-Allow-Credentials: true');
 
-// Handle preflight
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit;
 }
 
+session_start();
+
 // ==============================================
 // AUTHENTICATION & AUTHORIZATION
 // ==============================================
-session_start();
-
-// Check if admin is logged in
 if (!isset($_SESSION['admin_id']) || !isset($_SESSION['admin_token'])) {
     jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
 }
@@ -48,24 +41,26 @@ try {
     $db = Database::getInstance();
     $conn = $db->getConnection();
     
-    // Verify admin status
     $stmt = $conn->prepare("
-        SELECT id, username, is_admin, is_active 
-        FROM users 
-        WHERE id = :admin_id 
-        AND is_admin = 1 
-        AND is_active = 1
+        SELECT u.id, u.username, u.is_admin, u.is_active 
+        FROM users u
+        JOIN sessions s ON u.id = s.user_id
+        WHERE u.id = :admin_id 
+        AND u.is_admin = 1 
+        AND u.is_active = 1
+        AND s.session_token = :token
+        AND s.is_active = 1
+        AND s.expires_at > NOW()
     ");
-    $stmt->execute([':admin_id' => $_SESSION['admin_id']]);
+    $stmt->execute([
+        ':admin_id' => $_SESSION['admin_id'],
+        ':token' => $_SESSION['admin_token']
+    ]);
     $admin = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if (!$admin) {
-        jsonResponse(false, 'Unauthorized - Admin access required', [], 401);
-    }
-    
-    // Verify admin token
-    if ($_SESSION['admin_token'] !== hash('sha256', $admin['id'] . $admin['username'] . 'admin_secret')) {
-        jsonResponse(false, 'Invalid session - Please login again', [], 401);
+        http_response_code(401);
+        jsonResponse(false, 'Unauthorized - Invalid admin session', [], 401);
     }
     
 } catch (Exception $e) {
@@ -75,7 +70,7 @@ try {
 // ==============================================
 // ROUTING
 // ==============================================
-$action = $_GET['action'] ?? $_POST['action'] ?? '';
+$action = isset($_GET['action']) ? $_GET['action'] : '';
 
 switch ($action) {
     case 'get_settings':
@@ -108,7 +103,8 @@ function handleGetSettings() {
                 setting_value,
                 setting_group,
                 setting_type,
-                description
+                description,
+                is_editable
             FROM system_settings
             ORDER BY setting_group, setting_key
         ");
@@ -147,7 +143,8 @@ function handleGetSettings() {
                 'key' => $setting['setting_key'],
                 'value' => $value,
                 'type' => $setting['setting_type'],
-                'description' => $setting['description']
+                'description' => $setting['description'],
+                'is_editable' => (bool)$setting['is_editable']
             ];
         }
         
@@ -167,13 +164,11 @@ function handleGetSettings() {
 function handleUpdateSettings() {
     global $db, $conn;
     
-    // Get input
     $input = json_decode(file_get_contents('php://input'), true);
     if (!$input || !isset($input['settings']) || !is_array($input['settings'])) {
         jsonResponse(false, 'Invalid settings data', [], 400);
     }
     
-    // Validate CSRF token
     $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
     if (!CSRFToken::validate($csrfToken)) {
         jsonResponse(false, 'Invalid CSRF token', [], 403);
@@ -184,6 +179,7 @@ function handleUpdateSettings() {
         
         $updatedCount = 0;
         $errors = [];
+        $updatedKeys = [];
         
         foreach ($input['settings'] as $key => $value) {
             // Validate setting key exists
@@ -226,6 +222,7 @@ function handleUpdateSettings() {
             
             if ($stmt->rowCount() > 0) {
                 $updatedCount++;
+                $updatedKeys[] = $key;
             }
         }
         
@@ -233,7 +230,7 @@ function handleUpdateSettings() {
         $logEntry = [
             'action' => 'settings_updated',
             'admin_id' => $_SESSION['admin_id'],
-            'settings' => array_keys($input['settings']),
+            'settings' => $updatedKeys,
             'updated_count' => $updatedCount,
             'errors' => $errors
         ];
@@ -253,6 +250,7 @@ function handleUpdateSettings() {
         
         jsonResponse(true, 'Settings updated successfully', [
             'updated_count' => $updatedCount,
+            'updated_keys' => $updatedKeys,
             'errors' => $errors
         ]);
         
@@ -283,7 +281,6 @@ function handleToggleMaintenance() {
     $enable = (bool)$input['enable'];
     $message = $input['message'] ?? 'We are currently performing scheduled maintenance. Please check back later.';
     
-    // Validate CSRF token
     $csrfToken = $input['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
     if (!CSRFToken::validate($csrfToken)) {
         jsonResponse(false, 'Invalid CSRF token', [], 403);
