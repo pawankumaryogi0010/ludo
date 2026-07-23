@@ -3,7 +3,7 @@
  * ======================================================
  * ADMIN INDEX.PHP - Pro Command Center (SECURE VERSION)
  * Ludo Tournament Platform - Admin Dashboard
- * Version: 3.0.0 - SECURE & COMPLETE
+ * Version: 3.1.0 - WITH TOURNAMENT MANAGEMENT
  * ======================================================
  */
 
@@ -260,6 +260,9 @@ function handleAdminAjax() {
             case 'get_financial_metrics':
                 $response = getFinancialMetrics($db, $conn);
                 break;
+            case 'get_tournaments':
+                $response = getTournamentsList($db, $conn);
+                break;
             default:
                 $response['message'] = 'Unknown action';
         }
@@ -405,6 +408,18 @@ function getAdminStats($db, $conn) {
     ");
     $stats['total_withdrawn'] = floatval($stmt->fetchColumn());
     $stats['platform_liability'] = $stats['total_user_balance'] - $stats['total_withdrawn'];
+    
+    // Total Tournaments
+    $stmt = $conn->query("SELECT COUNT(*) as total FROM tournaments");
+    $stats['total_tournaments'] = intval($stmt->fetchColumn());
+    
+    // Active Tournaments
+    $stmt = $conn->query("
+        SELECT COUNT(*) as active 
+        FROM tournaments 
+        WHERE status IN ('active', 'in_progress')
+    ");
+    $stats['active_tournaments_count'] = intval($stmt->fetchColumn());
     
     // Growth percentages (compared to last month)
     $stmt = $conn->query("
@@ -945,6 +960,49 @@ function getMatchesList($db, $conn) {
             'offset' => $offset
         ]
     ];
+}
+
+// ==============================================
+// GET TOURNAMENTS LIST (NEW)
+// ==============================================
+function getTournamentsList($db, $conn) {
+    $limit = intval($_GET['limit'] ?? 10);
+    $status = isset($_GET['status']) ? $_GET['status'] : '';
+    
+    $where = "1=1";
+    $params = [];
+    
+    if (!empty($status)) {
+        $where .= " AND status = :status";
+        $params[':status'] = $status;
+    }
+    
+    try {
+        $stmt = $conn->prepare("
+            SELECT 
+                t.*,
+                u.username as created_by_name,
+                (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id) as match_count
+            FROM tournaments t
+            LEFT JOIN users u ON t.created_by = u.id
+            WHERE {$where}
+            ORDER BY 
+                CASE t.status 
+                    WHEN 'active' THEN 1 
+                    WHEN 'in_progress' THEN 2 
+                    WHEN 'scheduled' THEN 3 
+                    ELSE 4 
+                END,
+                t.created_at DESC
+            LIMIT :limit
+        ");
+        $stmt->execute([':limit' => $limit]);
+        $tournaments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        return ['success' => true, 'data' => $tournaments];
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
 }
 
 // ==============================================
@@ -1575,6 +1633,67 @@ function getMatchesList($db, $conn) {
             height: 250px;
         }
         
+        /* Tournament Card */
+        .tournament-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 12px;
+        }
+        
+        .tournament-card {
+            background: #1a1a2e;
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            transition: all 0.2s;
+        }
+        
+        .tournament-card:hover {
+            border-color: rgba(251, 191, 36, 0.15);
+            transform: translateY(-2px);
+        }
+        
+        .tournament-card .t-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .tournament-card .t-title strong {
+            color: #fbbf24;
+            font-size: 15px;
+        }
+        
+        .tournament-card .t-status {
+            font-size: 11px;
+            padding: 2px 10px;
+            border-radius: 12px;
+        }
+        
+        .tournament-card .t-status.scheduled { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+        .tournament-card .t-status.active { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .tournament-card .t-status.in_progress { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+        .tournament-card .t-status.completed { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .tournament-card .t-status.cancelled { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+        
+        .tournament-card .t-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px;
+            font-size: 13px;
+            color: #94a3b8;
+        }
+        
+        .tournament-card .t-details span {
+            padding: 2px 0;
+        }
+        
+        .tournament-card .t-details .t-amount {
+            color: #fbbf24;
+            font-weight: 600;
+        }
+        
         /* Responsive */
         @media (max-width: 768px) {
             .stats-grid {
@@ -1600,6 +1719,10 @@ function getMatchesList($db, $conn) {
             
             .login-box {
                 padding: 24px;
+            }
+            
+            .tournament-grid {
+                grid-template-columns: 1fr;
             }
         }
         
@@ -1663,6 +1786,8 @@ function getMatchesList($db, $conn) {
                 <a href="kyc.php" class="nav-link" title="KYC Management">🛡️ KYC</a>
                 <a href="withdrawals.php" class="nav-link" title="Withdrawals">🏦 Withdrawals</a>
                 <a href="disputes.php" class="nav-link" title="Disputes">📋 Disputes</a>
+                <a href="tournaments.php" class="nav-link" title="Tournament Management">🏆 Tournaments</a>
+                <a href="admin_users.php" class="nav-link" title="User Management">👥 Users</a>
                 <a href="?logout=1" class="logout">🚪 Logout</a>
             </div>
         </div>
@@ -1683,6 +1808,11 @@ function getMatchesList($db, $conn) {
                 <span class="icon">📋</span>
                 <span class="label">Open Disputes</span>
                 <span class="count" id="quickDisputes">...</span>
+            </a>
+            <a href="tournaments.php" class="quick-action">
+                <span class="icon">🏆</span>
+                <span class="label">Tournaments</span>
+                <span class="count" id="quickTournaments">...</span>
             </a>
             <a href="settings.php" class="quick-action">
                 <span class="icon">⚙️</span>
@@ -1765,6 +1895,7 @@ function getMatchesList($db, $conn) {
             <button class="admin-tab" data-tab="matches">🎯 Matches</button>
             <button class="admin-tab" data-tab="transactions">💳 Transactions</button>
             <button class="admin-tab" data-tab="analytics">📊 Analytics</button>
+            <button class="admin-tab" data-tab="tournaments">🏆 Tournaments</button>
         </div>
         
         <!-- Tab: Users -->
@@ -1924,6 +2055,27 @@ function getMatchesList($db, $conn) {
             </div>
         </div>
         
+        <!-- Tab: Tournaments (NEW) -->
+        <div class="tab-content" id="tab-tournaments">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
+                <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                    <span style="color: #94a3b8; font-size: 14px;">Filter:</span>
+                    <select id="tournamentStatusFilter" onchange="state.tournamentStatus = this.value; loadTournaments();" style="padding: 6px 12px; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; background: rgba(255,255,255,0.04); color: #f1f5f9; font-size: 13px; font-family: inherit;">
+                        <option value="">All</option>
+                        <option value="scheduled">Scheduled</option>
+                        <option value="active">Active</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="completed">Completed</option>
+                        <option value="cancelled">Cancelled</option>
+                    </select>
+                </div>
+                <a href="tournaments.php" class="btn-action primary" style="padding: 8px 20px; text-decoration: none; display: inline-block;">➕ Manage Tournaments</a>
+            </div>
+            <div id="tournamentList">
+                <div class="loading">Loading tournaments...</div>
+            </div>
+        </div>
+        
     </div>
     
     <!-- ==============================================
@@ -1971,7 +2123,7 @@ function getMatchesList($db, $conn) {
     <div class="toast" id="adminToast"></div>
     
     <!-- ==============================================
-    ADMIN JAVASCRIPT (COMPLETE WITH CHART.JS)
+    ADMIN JAVASCRIPT (COMPLETE WITH CHART.JS & TOURNAMENTS)
     ============================================== -->
     <script>
         // ==============================================
@@ -1983,7 +2135,8 @@ function getMatchesList($db, $conn) {
             usersTotal: 0,
             searchTimeout: null,
             chartInstance: null,
-            revenueData: []
+            revenueData: [],
+            tournamentStatus: ''
         };
         
         // ==============================================
@@ -2020,6 +2173,7 @@ function getMatchesList($db, $conn) {
                     else if (tabId === 'matches') loadMatches();
                     else if (tabId === 'transactions') loadTransactions();
                     else if (tabId === 'analytics') loadAnalytics();
+                    else if (tabId === 'tournaments') loadTournaments();
                 });
             });
             
@@ -2027,6 +2181,7 @@ function getMatchesList($db, $conn) {
             loadStats();
             loadUsers();
             loadQuickStats();
+            loadTournaments();
         });
         
         // ==============================================
@@ -2059,6 +2214,17 @@ function getMatchesList($db, $conn) {
                 .then(data => {
                     if (data.success) {
                         document.getElementById('quickDisputes').textContent = data.data.open || 0;
+                    }
+                })
+                .catch(() => {});
+            
+            // Load Tournament count
+            fetch('?ajax=1&action=get_tournaments&limit=1')
+                .then(handleApiResponse)
+                .then(data => {
+                    if (data.success) {
+                        const activeCount = data.data.filter(t => t.status === 'active' || t.status === 'in_progress').length;
+                        document.getElementById('quickTournaments').textContent = activeCount || 0;
                     }
                 })
                 .catch(() => {});
@@ -2424,6 +2590,69 @@ function getMatchesList($db, $conn) {
         }
         
         // ==============================================
+        // LOAD TOURNAMENTS (NEW)
+        // ==============================================
+        function loadTournaments() {
+            const container = document.getElementById('tournamentList');
+            const status = document.getElementById('tournamentStatusFilter')?.value || '';
+            
+            container.innerHTML = '<div class="loading"><div class="loading-spinner"></div> Loading tournaments...</div>';
+            
+            fetch(`?ajax=1&action=get_tournaments&limit=20&status=${status}`)
+                .then(handleApiResponse)
+                .then(data => {
+                    if (data.success) {
+                        renderTournaments(data.data);
+                    } else {
+                        container.innerHTML = `<p style="color: #ef4444;">${data.message}</p>`;
+                    }
+                })
+                .catch(() => {
+                    container.innerHTML = '<p style="color: #ef4444;">Failed to load tournaments</p>';
+                });
+        }
+        
+        function renderTournaments(tournaments) {
+            const container = document.getElementById('tournamentList');
+            
+            if (!tournaments || tournaments.length === 0) {
+                container.innerHTML = '<p style="color: #94a3b8; text-align: center; padding: 40px;">No tournaments available. <a href="tournaments.php" style="color: #8b5cf6; text-decoration: none;">Create one</a></p>';
+                return;
+            }
+            
+            const statusColors = {
+                'scheduled': 'scheduled',
+                'active': 'active',
+                'in_progress': 'in_progress',
+                'completed': 'completed',
+                'cancelled': 'cancelled'
+            };
+            
+            let html = '<div class="tournament-grid">';
+            
+            tournaments.forEach(t => {
+                html += `
+                    <div class="tournament-card">
+                        <div class="t-title">
+                            <strong>${escapeHtml(t.name)}</strong>
+                            <span class="t-status ${statusColors[t.status] || 'scheduled'}">${t.status.replace('_', ' ').toUpperCase()}</span>
+                        </div>
+                        <div class="t-details">
+                            <span>Entry: <span class="t-amount">₹${parseFloat(t.entry_fee).toFixed(2)}</span></span>
+                            <span>Prize: <span class="t-amount">₹${parseFloat(t.prize_pool).toFixed(2)}</span></span>
+                            <span>Players: ${t.current_players}/${t.max_players}</span>
+                            <span>Matches: ${t.match_count || 0}</span>
+                            <span style="grid-column: span 2; font-size: 12px; color: #64748b;">Code: ${escapeHtml(t.tournament_code)}</span>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        // ==============================================
         // EDIT BALANCE MODAL
         // ==============================================
         function editBalance(userId, username, currentBalance) {
@@ -2550,6 +2779,7 @@ function getMatchesList($db, $conn) {
                 loadStats();
                 loadUsers();
                 loadQuickStats();
+                loadTournaments();
             }
         });
         
@@ -2564,6 +2794,7 @@ function getMatchesList($db, $conn) {
                 else if (tabId === 'matches') loadMatches();
                 else if (tabId === 'transactions') loadTransactions();
                 else if (tabId === 'analytics') loadAnalytics();
+                else if (tabId === 'tournaments') loadTournaments();
             }
             loadStats();
             loadQuickStats();
